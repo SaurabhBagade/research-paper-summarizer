@@ -8,13 +8,23 @@ import torch
 app = FastAPI(title="Research Paper Summarizer Model API", version="1.0")
 
 # --- Model Loading ---
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
+if device == "cuda":
+    # User requested exactly 5GB limit in GPU
+    limit_bytes = 5 * 1024 * 1024 * 1024
+    total_memory = torch.cuda.get_device_properties(0).total_memory
+    if limit_bytes < total_memory:
+        fraction = limit_bytes / total_memory
+        torch.cuda.set_per_process_memory_fraction(fraction, 0)
+        print(f"Limiting CUDA memory to 5GB (Fraction: {fraction:.2f} of {total_memory / 1e9:.2f} GB)")
+
 # Note: Specter2 is designed for Scientific papers
 print("Loading Specter2 Embedding Model...")
-embedder = SentenceTransformer('allenai/specter2_base')
+embedder = SentenceTransformer('allenai/specter2_base', device=device)
 
 print("Loading Flan-T5 Generation Model...")
 # Use flan-t5-base for reasonable performance/size locally
-device = "cuda" if torch.cuda.is_available() else "cpu"
 tokenizer = AutoTokenizer.from_pretrained('google/flan-t5-base')
 t5_model = AutoModelForSeq2SeqLM.from_pretrained('google/flan-t5-base').to(device)
 print("Models Loaded.")
