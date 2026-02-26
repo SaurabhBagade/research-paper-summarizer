@@ -6,7 +6,10 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 from extraction_utils import extract_text, extract_images, extract_tables
-from embedding_utils import process_and_embed
+from embedding_utils import process_and_embed, get_embeddings_from_api, CHROMADB_HOST, CHROMADB_PORT, MODEL_API_URL
+from pydantic import BaseModel
+import chromadb
+import requests
 # Configure Logging
 logging.basicConfig(
     level=logging.INFO,
@@ -89,6 +92,65 @@ async def upload_pdf(file: UploadFile = File(...)):
         "message": f"{file.filename} processed and embedded successfully.",
         "document_id": safe_col_name
     }
+
+class AskRequest(BaseModel):
+    query: str
+    document_id: str
+
+@app.post("/ask")
+def ask_question(req: AskRequest):
+    """
+    RAG Endpoint: 
+    1. Embeds the user query.
+    2. Searches ChromaDB for relevant context.
+    3. Sends the context + query to FLAN-T5 for an answer.
+    """
+    try:
+        # 1. Embed the Question
+        logger.info(f"Embedding query: '{req.query}'")
+        query_embedding = get_embeddings_from_api([req.query])
+        if not query_embedding:
+            raise HTTPException(status_code=500, detail="Failed to embed query using model_api")
+
+        # 2. Search Vector DB for context
+        logger.info(f"Querying ChromaDB collection '{req.document_id}'...")
+        client = chromadb.HttpClient(host=CHROMADB_HOST, port=CHROMADB_PORT)
+        try:
+            collection = client.get_collection(name=req.document_id)
+        except Exception as e:
+            raise HTTPException(status_code=404, detail=f"Document ID '{req.document_id}' not found in database. Did you upload it?")
+
+        results = collection.query(
+            query_embeddings=query_embedding,
+            n_results=3 # Get top 3 most relevant chunks
+        )
+        
+        # 3. Compile Context
+        if not results['documents'] or not results['documents'][0]:
+            return {"answer": "I could not find relevant information in the document to answer your question.", "context": []}
+            
+        context_chunks = results['documents'][0]
+        context_text = "\n\n".join(context_chunks)
+        
+        # 4. Generate Answer using FLAN-T5
+        prompt = f"Based on the following extracted context from a research paper, answer the question.\n\nContext:\n{context_text}\n\nQuestion: {req.query}\n\nAnswer:"
+        
+        logger.info("Sending prompt to model_api /generate...")
+        response = requests.post(f"{MODEL_API_URL}/generate", json={"prompt": prompt, "max_length": 256})
+        response.raise_for_status()
+        
+        answer = response.json().get("generated_text", "Failed to generate text.")
+        
+        return {
+            "answer": answer,
+            "context_used": context_chunks
+        }
+        
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        logger.error(f"Error during Q&A: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/health")
 def health_check():
