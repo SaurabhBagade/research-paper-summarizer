@@ -1,0 +1,57 @@
+services:
+  chromadb:
+    image: chromadb/chroma:latest
+    ports:
+      - "8000:8000"
+    environment:
+      - IS_PERSISTENT=TRUE
+      - PERSIST_DIRECTORY=/chroma/chroma
+      - ALLOW_RESET=TRUE
+    volumes:
+      - ./EXTRACT/vectorstore:/chroma/chroma
+    restart: always
+
+  model_api:
+    build: 
+      context: ./model_api
+      args:
+        - HF_TOKEN=${HF_TOKEN}
+    ports:
+      - "8008:8000"
+    volumes:
+      - ./model_api/cache:/root/.cache
+    environment:
+      - HF_TOKEN=${HF_TOKEN}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # The new backend orchestration
+  backend:
+    build:
+      context: ./backend
+    ports:
+      - "8080:8080"
+    environment:
+      # URLs to speak to other containers
+      - CHROMADB_HOST=chromadb
+      - CHROMADB_PORT=8000
+      - MODEL_API_URL=http://model_api:8000
+    volumes:
+      - ./EXTRACT:/app/EXTRACT
+      - ./data_pdf:/app/data_pdf
+    restart: always
+    depends_on:
+      - chromadb
+      - model_api

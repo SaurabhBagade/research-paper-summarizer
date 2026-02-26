@@ -1,0 +1,4 @@
+.env
+/data_pdf
+/EXTRACT
+/model_api/cache

@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+python-multipart
+requests
+langchain
+langchain-text-splitters
+chromadb
+pymupdf
+pdfplumber
