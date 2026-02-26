@@ -19,18 +19,55 @@ There are three primary containers:
 
 ### Setup
 
-1. **Clone the repository.**
+1. **Clone the repository and enter the directory:**
+   ```bash
+   git clone <repository_url>
+   cd research-paper-summarizer
+   ```
+
 2. **Configure Environment Variables:**
-   Create a `.env` file in the root directory (where `docker-compose.yaml` is located) with the following variable if needed:
+   Create a `.env` file in the root directory (where `docker-compose.yaml` is located) with your HuggingFace token (needed for downloading the model data if required):
    ```env
    HF_TOKEN=your_huggingface_token
    ```
 
-3. **Start the containers:**
+3. **Start the Project:**
+   Start all components in detached mode:
    ```bash
    docker-compose up -d --build
    ```
    *Note: On the very first boot, the `model_api` container will download the Specter2 and T5 models (~3-4 GB total) into the `model_api/cache` directory. Subsequent boots will be instantaneous.*
+
+4. **Verify it is running:**
+   Check the status of the containers:
+   ```bash
+   docker-compose ps
+   ```
+   You should see `backend`, `model_api`, and `chromadb` with a state of `Up`.
+
+### 🔧 Managing the Application
+
+**View Logs:**
+To see what the containers are doing (useful for debugging or tracking the model downloads and document extraction progress):
+```bash
+docker-compose logs -f
+```
+*(Press `Ctrl+C` to exit log view)*
+
+**Stop the Application:**
+To gracefully stop the containers (without deleting any persisted data):
+```bash
+docker-compose stop
+```
+
+**Tear Down:**
+To stop and remove containers and networks (your persisted vectorstore in `./EXTRACT` and model cache in `model_api/cache` will remain safe on your disk):
+```bash
+docker-compose down
+```
+
+**CPU-Only Mode (If you don't have an NVIDIA GPU):**
+By default, the `docker-compose.yaml` expects an NVIDIA GPU. If you don't have one and get an error starting the `model_api` container, open `docker-compose.yaml` and comment out or delete the `deploy:` block (and its child attributes) under the `model_api` service. Then run `docker-compose up -d --build` again.
 
 ### Usage
 
