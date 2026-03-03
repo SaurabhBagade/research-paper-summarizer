@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { UploadView } from './components/UploadView';
 import { ChatView } from './components/ChatView';
 import { Sidebar, ChatSession } from './components/Sidebar';
+import apiClient from './api/client';
 
 interface Message {
   id: string;
@@ -14,35 +15,20 @@ interface ChatSessionWithMessages extends ChatSession {
   messages: Message[];
 }
 
-const STORAGE_KEY = 'research-paper-chat-sessions';
-
 export default function App() {
   const [sessions, setSessions] = useState<ChatSessionWithMessages[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [view, setView] = useState<'upload' | 'chat'>('chat');
 
-  // Load sessions from localStorage on mount
+  // Load sessions from API on mount
   useEffect(() => {
-    const stored = localStorage.getItem(STORAGE_KEY);
-    if (stored) {
-      try {
-        const parsedSessions = JSON.parse(stored);
-        setSessions(parsedSessions);
-      } catch (e) {
-        console.error('Failed to load sessions:', e);
-      }
-    }
+    apiClient.get('/api/sessions')
+      .then((res: any) => setSessions(res.data))
+      .catch((e: any) => console.error('Failed to load sessions:', e));
   }, []);
 
-  // Save sessions to localStorage whenever they change
-  useEffect(() => {
-    if (sessions.length > 0) {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(sessions));
-    }
-  }, [sessions]);
-
-  const handleUploadComplete = (documentId: string, documentName: string) => {
-    const newSession: ChatSessionWithMessages = {
+  const handleUploadComplete = async (documentId: string, documentName: string) => {
+    const newSession = {
       id: Date.now().toString(),
       documentId,
       documentName,
@@ -51,9 +37,14 @@ export default function App() {
       messages: [],
     };
 
-    setSessions((prev) => [newSession, ...prev]);
-    setCurrentSessionId(newSession.id);
-    setView('chat');
+    try {
+      await apiClient.post('/api/sessions', newSession);
+      setSessions((prev) => [newSession, ...prev]);
+      setCurrentSessionId(newSession.id);
+      setView('chat');
+    } catch (e) {
+      console.error('Failed to create session:', e);
+    }
   };
 
   const handleNewChat = () => {
@@ -66,11 +57,16 @@ export default function App() {
     setView('chat');
   };
 
-  const handleDeleteSession = (sessionId: string) => {
-    setSessions((prev) => prev.filter((s) => s.id !== sessionId));
-    if (currentSessionId === sessionId) {
-      setCurrentSessionId(null);
-      setView('upload');
+  const handleDeleteSession = async (sessionId: string) => {
+    try {
+      await apiClient.delete(`/api/sessions/${sessionId}`);
+      setSessions((prev) => prev.filter((s) => s.id !== sessionId));
+      if (currentSessionId === sessionId) {
+        setCurrentSessionId(null);
+        setView('upload');
+      }
+    } catch (e) {
+      console.error('Failed to delete session:', e);
     }
   };
 
@@ -85,8 +81,6 @@ export default function App() {
   };
 
   const currentSession = sessions.find((s) => s.id === currentSessionId);
-
-  // Show sidebar only when we have sessions or in chat view
   const showSidebar = sessions.length > 0 || view === 'chat';
 
   return (
@@ -107,7 +101,7 @@ export default function App() {
           <ChatView
             documentId={currentSession.documentId}
             sessionId={currentSession.id}
-            initialMessages={currentSession.messages}
+            initialMessages={currentSession.messages || []}
             onMessagesUpdate={handleUpdateMessages}
             onNewChat={handleNewChat}
           />

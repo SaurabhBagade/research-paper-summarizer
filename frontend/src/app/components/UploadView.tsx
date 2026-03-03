@@ -1,5 +1,6 @@
 import { useState, useCallback } from 'react';
 import { Upload, FileText, Loader2 } from 'lucide-react';
+import apiClient from '../api/client';
 
 interface UploadViewProps {
   onUploadComplete: (documentId: string, fileName: string) => void;
@@ -35,18 +36,11 @@ export function UploadView({ onUploadComplete }: UploadViewProps) {
     formData.append('file', file);
 
     try {
-      const response = await fetch('/api/upload-pdf', {
-        method: 'POST',
-        body: formData,
+      const { data } = await apiClient.post('/api/upload-pdf', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
       });
-
-      if (!response.ok) {
-        throw new Error('Upload failed');
-      }
-
-      const data = await response.json();
       onUploadComplete(data.document_id, file.name);
-    } catch (err) {
+    } catch {
       setError('Failed to upload and process the PDF. Please try again.');
       setIsUploading(false);
     }
@@ -84,11 +78,10 @@ export function UploadView({ onUploadComplete }: UploadViewProps) {
 
         {/* Upload Area */}
         <div
-          className={`relative backdrop-blur-xl bg-white/60 rounded-3xl border-2 border-dashed transition-all duration-300 ${
-            isDragging
+          className={`relative backdrop-blur-xl bg-white/60 rounded-3xl border-2 border-dashed transition-all duration-300 ${isDragging
               ? 'border-indigo-500 bg-indigo-50/50 scale-105'
               : 'border-gray-300 hover:border-indigo-400'
-          } ${isUploading ? 'pointer-events-none' : ''}`}
+            } ${isUploading ? 'pointer-events-none' : ''}`}
           onDragOver={handleDragOver}
           onDragLeave={handleDragLeave}
           onDrop={handleDrop}

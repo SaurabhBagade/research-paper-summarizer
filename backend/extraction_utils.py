@@ -25,6 +25,51 @@ def extract_text(pdf_path, output_json_path):
         logger.error(f"Error extracting text from {pdf_path}: {e}", exc_info=True)
         return None
 
+
+def extract_text_blocks(pdf_path, output_json_path):
+    """
+    Extracts text blocks with bounding boxes per page using PyMuPDF.
+    Saved alongside the regular text JSON and used by the embedding pipeline
+    to store chunk coordinates in ChromaDB for exact section highlighting.
+
+    Output structure:
+    {
+      "1": {
+        "page_width": 612, "page_height": 792,
+        "blocks": [{"text": "...", "bbox": [x0, y0, x1, y1]}, ...]
+      }, ...
+    }
+    """
+    try:
+        doc = fitz.open(pdf_path)
+        block_data = {}
+        for i, page in enumerate(doc):
+            page_blocks = []
+            for block in page.get_text("blocks"):
+                # block = (x0, y0, x1, y1, text, block_no, block_type)
+                # block_type 0 = text, 1 = image — skip images
+                if block[6] == 0:
+                    text = block[4].strip()
+                    if text:
+                        page_blocks.append({
+                            "text": text,
+                            "bbox": [block[0], block[1], block[2], block[3]],
+                        })
+            block_data[str(i + 1)] = {
+                "page_width": page.rect.width,
+                "page_height": page.rect.height,
+                "blocks": page_blocks,
+            }
+
+        with open(output_json_path, 'w', encoding='utf-8') as f:
+            json.dump(block_data, f, indent=2)
+        logger.info(f"Text blocks extracted to {output_json_path}")
+        return block_data
+    except Exception as e:
+        logger.error(f"Error extracting text blocks from {pdf_path}: {e}", exc_info=True)
+        return None
+
+
 def extract_images(pdf_path, output_img_dir):
     """
     Extracts images from a PDF and saves them to the output directory.
