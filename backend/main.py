@@ -7,8 +7,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 import uvicorn
 
-from extraction_utils import extract_text, extract_images, extract_tables, extract_text_blocks
-from embedding_utils import process_and_embed, get_embeddings_from_api, CHROMADB_HOST, CHROMADB_PORT, MODEL_API_URL
+from extraction_utils import extract_text, extract_images, extract_tables, extract_text_blocks, extract_image_index
+from embedding_utils import process_and_embed, embed_image_captions, get_embeddings_from_api, CHROMADB_HOST, CHROMADB_PORT, MODEL_API_URL
 from pydantic import BaseModel
 import chromadb
 import requests
@@ -75,10 +75,11 @@ async def upload_pdf(file: UploadFile = File(...)):
     logger.info(f"[{safe_col_name}] Step 2a+: Extracting Text Blocks with Coordinates...")
     extract_text_blocks(file_path, blocks_json_path)
 
-    # Image Extraction
+    # Image Extraction + Caption Index (replaces plain extract_images)
     img_dir_path = os.path.join(EXTRACT_DIR, 'images', f"{base_name}_images")
-    logger.info(f"[{safe_col_name}] Step 2b: Extracting Images...")
-    extract_images(file_path, img_dir_path)
+    img_index_path = os.path.join(EXTRACT_DIR, 'images', f"{base_name}_image_index.json")
+    logger.info(f"[{safe_col_name}] Step 2b: Extracting Images + Building Caption Index...")
+    extract_image_index(file_path, img_dir_path, img_index_path)
 
     # Table Extraction — run with a timeout to avoid pdfplumber hanging on complex PDFs
     table_dir_path = os.path.join(EXTRACT_DIR, 'tables', f"{base_name}_tables")
@@ -92,9 +93,16 @@ async def upload_pdf(file: UploadFile = File(...)):
     except Exception as e:
         logger.warning(f"[{safe_col_name}] Table extraction failed: {e} — skipping tables.")
 
-    # 3. Vectorization (Chunk & Embed) — pass blocks JSON for bbox-aware chunking
-    logger.info(f"[{safe_col_name}] Step 3: Chunking and Embedding...")
+    # 3. Vectorization (Chunk & Embed) — text chunks with bbox coords
+    logger.info(f"[{safe_col_name}] Step 3a: Chunking and Embedding Text...")
     success = process_and_embed(text_json_path, safe_col_name, blocks_json_path=blocks_json_path)
+
+    # 4. Embed image captions for image retrieval (non-blocking — failure doesn't abort upload)
+    logger.info(f"[{safe_col_name}] Step 3b: Embedding Image Captions...")
+    try:
+        embed_image_captions(img_index_path, safe_col_name)
+    except Exception as e:
+        logger.warning(f"[{safe_col_name}] Image caption embedding failed (non-critical): {e}")
     
     if not success:
         logger.error(f"[{safe_col_name}] Pipeline failed during embedding phase.")
@@ -287,11 +295,35 @@ async def ask_question(req: AskRequest):
             except Exception as _e:
                 logger.warning(f"Sentence-level highlight extraction failed: {_e}")
 
+        # 4c. Query image collection for relevant figures (based on same query embedding)
+        relevant_images = []
+        try:
+            img_collection = client.get_collection(name=f"{req.document_id}_images")
+            img_results = img_collection.query(
+                query_embeddings=query_embedding,
+                n_results=2,
+                include=["metadatas", "distances"],
+            )
+            for meta, distance in zip(
+                img_results.get("metadatas", [[]])[0],
+                img_results.get("distances", [[]])[0],
+            ):
+                # Only include images that are semantically close (distance threshold)
+                if distance < 1.2 and meta.get("filename"):
+                    relevant_images.append({
+                        "filename": meta["filename"],
+                        "page": meta.get("page", 1),
+                        "caption": meta.get("caption", ""),
+                    })
+        except Exception:
+            pass  # No image collection yet — skip silently
+
         return {
             "answer": answer,
             "context_used": context_chunks,
             "context_pages": context_pages,
             "context_highlights": context_highlights,
+            "relevant_images": relevant_images,
         }
         
     except HTTPException as he:
@@ -299,6 +331,21 @@ async def ask_question(req: AskRequest):
     except Exception as e:
         logger.error(f"Error during Q&A: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/images/{document_id}/{filename}")
+def serve_image(document_id: str, filename: str):
+    """
+    Serves an extracted figure image file so the frontend can display it.
+    """
+    # Find the matching image directory
+    for base_name in os.listdir(os.path.join(EXTRACT_DIR, 'images')):
+        safe = ''.join(e for e in base_name.replace('_images', '') if e.isalnum())
+        if safe == document_id:
+            img_path = os.path.join(EXTRACT_DIR, 'images', base_name, filename)
+            if os.path.exists(img_path):
+                return FileResponse(path=img_path)
+    raise HTTPException(status_code=404, detail=f"Image '{filename}' not found for document '{document_id}'.")
+
 
 @app.get("/pdf/{document_id}")
 def serve_pdf(document_id: str):

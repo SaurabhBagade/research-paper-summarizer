@@ -2,7 +2,6 @@ import os
 import json
 import logging
 import requests
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 import chromadb
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -37,8 +36,9 @@ def load_text_blocks(blocks_json_path):
 def chunk_blocks(pages_data, chunk_size=800, chunk_overlap=150):
     """
     Chunks text block-by-block per page.
-    Each chunk tracks the UNION bounding box of all blocks it contains,
-    enabling full section highlighting in the PDF viewer.
+    Each chunk is composed of **complete sentences** — never split mid-sentence.
+    Each sentence inherits the bbox of its parent text block.
+    The chunk's stored bbox = union of all sentence bboxes in the chunk.
 
     Returns list of:
     {text, page_num, bbox: [x0,y0,x1,y1], page_width, page_height}
@@ -54,43 +54,70 @@ def chunk_blocks(pages_data, chunk_size=800, chunk_overlap=150):
         if not blocks:
             continue
 
-        current_text = ""
-        current_bboxes = []
-
+        # Flatten blocks into (sentence, bbox) pairs
+        sentence_units = []
         for block in blocks:
-            block_text = block["text"]
             block_bbox = block["bbox"]
+            for sent in _split_sentences(block["text"]):
+                if sent.strip():
+                    sentence_units.append((sent.strip(), block_bbox))
 
-            # If adding this block would exceed chunk_size, flush the current chunk
-            if len(current_text) + len(block_text) > chunk_size and current_text:
-                union_bbox = _union_bbox(current_bboxes)
+        if not sentence_units:
+            continue
+
+        current_sents = []
+        current_bboxes = []
+        current_len = 0
+
+        for sent, bbox in sentence_units:
+            sent_len = len(sent)
+
+            # Flush when adding this sentence would exceed chunk_size
+            # (always allow at least one sentence per chunk)
+            if current_len + sent_len > chunk_size and current_sents:
                 result.append({
-                    "text": current_text.strip(),
+                    "text": " ".join(current_sents),
                     "page_num": page_num,
-                    "bbox": union_bbox,
+                    "bbox": _union_bbox(current_bboxes),
                     "page_width": page_width,
                     "page_height": page_height,
                 })
-                # Overlap: carry last block into next chunk
-                current_text = block_text + "\n"
-                current_bboxes = [block_bbox]
-            else:
-                current_text += block_text + "\n"
-                current_bboxes.append(block_bbox)
+                # Overlap: carry last sentence into next chunk
+                current_sents = [current_sents[-1]] if current_sents else []
+                current_bboxes = [current_bboxes[-1]] if current_bboxes else []
+                current_len = len(current_sents[0]) if current_sents else 0
 
-        # Flush the last chunk on this page
-        if current_text.strip():
+            current_sents.append(sent)
+            current_bboxes.append(bbox)
+            current_len += sent_len + 1  # +1 for the space
+
+        # Flush remaining sentences on this page
+        if current_sents:
             result.append({
-                "text": current_text.strip(),
+                "text": " ".join(current_sents),
                 "page_num": page_num,
                 "bbox": _union_bbox(current_bboxes),
                 "page_width": page_width,
                 "page_height": page_height,
             })
 
-    logger.info(f"Generated {len(result)} chunks with bbox data.")
+    logger.info(f"Generated {len(result)} sentence-boundary chunks with bbox data.")
     return result
 
+
+def _split_sentences(text):
+    """
+    Split text into sentences using NLTK's Punkt tokenizer.
+    Much more accurate than regex for academic text — handles citations like [1].,
+    abbreviations, formulas with periods, and lowercase sentence continuations.
+    """
+    import nltk
+    # Download Punkt data silently on first use
+    try:
+        nltk.data.find('tokenizers/punkt_tab')
+    except LookupError:
+        nltk.download('punkt_tab', quiet=True)
+    return nltk.sent_tokenize(text)
 
 def _union_bbox(bboxes):
     """Compute the bounding rectangle that contains all the given bboxes."""
@@ -103,32 +130,6 @@ def _union_bbox(bboxes):
         max(b[3] for b in bboxes),
     ]
 
-
-# ── Fallback: page-level text loading (no bbox) ────────────────────────────────
-
-def load_extracted_text(json_path):
-    """Fallback loader when no block JSON is available."""
-    if not os.path.exists(json_path):
-        logger.error(f"Error: {json_path} does not exist.")
-        return None
-    with open(json_path, 'r', encoding='utf-8') as f:
-        data = json.load(f)
-    pages = []
-    for page_num_str, text in data.items():
-        if text and text.strip():
-            pages.append({"page_num": int(page_num_str), "text": text})
-    return pages
-
-
-def chunk_page(page_text, page_num, chunk_size=800, chunk_overlap=150):
-    """Fallback chunker — no bbox data."""
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
-        length_function=len,
-        is_separator_regex=False,
-    )
-    return [{"text": c, "page_num": page_num, "bbox": None} for c in splitter.split_text(page_text)]
 
 
 # ── Shared utilities ───────────────────────────────────────────────────────────
@@ -165,27 +166,69 @@ def store_in_chroma(chunks, embeddings, collection_name, metadatas):
         return False
 
 
+def embed_image_captions(image_index_path, collection_name):
+    """
+    Reads the image index JSON produced by extract_image_index(), embeds each figure
+    caption, and stores them in a separate ChromaDB collection ({collection_name}_images).
+    At query time, this collection is searched to find images relevant to the question.
+    """
+    if not os.path.exists(image_index_path):
+        logger.warning(f"Image index not found: {image_index_path} — skipping image embedding.")
+        return False
+
+    with open(image_index_path, "r", encoding="utf-8") as f:
+        image_index = json.load(f)
+
+    if not image_index:
+        logger.info("No captioned images found in index — skipping image embedding.")
+        return True
+
+    captions = [entry["caption"] for entry in image_index]
+    embeddings = get_embeddings_from_api(captions)
+    if not embeddings:
+        logger.error("Failed to get embeddings for image captions.")
+        return False
+
+    metadatas = [
+        {
+            "filename": entry["filename"],
+            "page": entry["page"],
+            "caption": entry["caption"],
+        }
+        for entry in image_index
+    ]
+
+    img_collection_name = f"{collection_name}_images"
+    logger.info(f"Storing {len(image_index)} image caption embeddings in '{img_collection_name}'...")
+    try:
+        client = chromadb.HttpClient(host=CHROMADB_HOST, port=CHROMADB_PORT)
+        try:
+            client.delete_collection(name=img_collection_name)
+        except Exception:
+            pass
+        collection = client.get_or_create_collection(name=img_collection_name)
+        ids = [f"img_{i}" for i in range(len(image_index))]
+        collection.add(embeddings=embeddings, documents=captions, metadatas=metadatas, ids=ids)
+        logger.info(f"Image captions stored in ChromaDB collection '{img_collection_name}'.")
+        return True
+    except Exception as e:
+        logger.error(f"Error storing image captions in ChromaDB: {e}", exc_info=True)
+        return False
+
+
 def process_and_embed(json_path, collection_name, blocks_json_path=None):
     """
-    Master pipeline: load → chunk (with bbox if blocks available) → embed → store.
-    If blocks_json_path is provided and exists, uses block-level chunking with full
-    section bbox coordinates stored per chunk. Falls back to page-level text chunking.
+    Master pipeline: load blocks → sentence-chunk with bbox → embed → store in ChromaDB.
+    blocks_json_path must point to the _blocks.json saved by extract_text_blocks().
     """
     logger.info(f"Starting embedding pipeline for: {json_path}")
 
-    # Prefer block-level data (has bbox coords for highlighting)
-    if blocks_json_path and os.path.exists(blocks_json_path):
-        logger.info("Using block-level chunking with bbox coordinates.")
-        pages_data = load_text_blocks(blocks_json_path)
-        tagged_chunks = chunk_blocks(pages_data)
-    else:
-        logger.info("Block JSON not found — falling back to page-level text chunking.")
-        pages = load_extracted_text(json_path)
-        if not pages:
-            return False
-        tagged_chunks = []
-        for page in pages:
-            tagged_chunks.extend(chunk_page(page["text"], page["page_num"]))
+    if not blocks_json_path or not os.path.exists(blocks_json_path):
+        logger.error("blocks_json_path is required but missing. Re-upload the PDF.")
+        return False
+
+    pages_data = load_text_blocks(blocks_json_path)
+    tagged_chunks = chunk_blocks(pages_data)
 
     if not tagged_chunks:
         logger.warning("No chunks generated.")

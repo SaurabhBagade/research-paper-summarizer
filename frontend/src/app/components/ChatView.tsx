@@ -10,12 +10,19 @@ import {
 import apiClient from '../api/client';
 import { PDFViewer, HighlightRect } from './PDFViewer';
 
+interface RelevantImage {
+  filename: string;
+  page: number;
+  caption: string;
+}
+
 interface Message {
   id: string;
   type: 'user' | 'assistant';
   content: string;
   context?: string[];
-  contextPages?: number[]; // page numbers used for this answer
+  contextPages?: number[];
+  images?: RelevantImage[];
   isNew?: boolean;
 }
 
@@ -82,6 +89,7 @@ export function ChatView({ documentId, sessionId, initialMessages, onMessagesUpd
         content: data.answer,
         context: data.context_used || [],
         contextPages: data.context_pages || [],
+        images: data.relevant_images || [],
         isNew: true,
       };
 
@@ -211,8 +219,40 @@ export function ChatView({ documentId, sessionId, initialMessages, onMessagesUpd
                             </AccordionItem>
                           </Accordion>
                         )}
+
+                        {/* Relevant figures — shown below the context accordion */}
+                        {message.images && message.images.length > 0 && (
+                          <div className="mt-4 pt-3 border-t border-gray-200">
+                            <p className="text-xs font-semibold text-gray-500 mb-2 flex items-center gap-1">
+                              <FileText className="w-3 h-3" /> Relevant Figures
+                            </p>
+                            <div className="flex flex-wrap gap-3">
+                              {message.images.map((img, idx) => (
+                                <a
+                                  key={idx}
+                                  href={`/api/images/${documentId}/${img.filename}`}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="group flex flex-col items-center gap-1"
+                                >
+                                  <div className="w-28 h-24 rounded-lg overflow-hidden border border-gray-200 bg-gray-50 shadow-sm group-hover:shadow-md group-hover:ring-2 group-hover:ring-indigo-400 transition-all duration-200">
+                                    <img
+                                      src={`/api/images/${documentId}/${img.filename}`}
+                                      alt={img.caption}
+                                      className="w-full h-full object-contain"
+                                    />
+                                  </div>
+                                  <p className="text-xs text-gray-500 max-w-[7rem] text-center leading-tight line-clamp-2 group-hover:text-indigo-600 transition-colors">
+                                    {img.caption}
+                                  </p>
+                                </a>
+                              ))}
+                            </div>
+                          </div>
+                        )}
                       </div>
                     </div>
+
                     {message.type === 'user' && (
                       <div className="flex-shrink-0 w-8 h-8 rounded-full bg-gray-700 flex items-center justify-center">
                         <User className="w-5 h-5 text-white" />
