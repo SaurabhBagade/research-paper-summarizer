@@ -166,11 +166,22 @@ def store_in_chroma(chunks, embeddings, collection_name, metadatas):
         return False
 
 
+def _image_to_base64(image_path):
+    """Auxiliary: Convert image file to base64 string for the vision API."""
+    import base64
+    try:
+        with open(image_path, "rb") as image_file:
+            return base64.b64encode(image_file.read()).decode('utf-8')
+    except Exception as e:
+        logger.error(f"Failed to encode image {image_path}: {e}")
+        return None
+
+
 def embed_image_captions(image_index_path, collection_name):
     """
-    Reads the image index JSON produced by extract_image_index(), embeds each figure
-    caption, and stores them in a separate ChromaDB collection ({collection_name}_images).
-    At query time, this collection is searched to find images relevant to the question.
+    Reads the image index JSON produced by extract_image_index(), enhances each
+    entry with a Vision AI description, and stores them in a separate ChromaDB
+    collection ({collection_name}_images).
     """
     if not os.path.exists(image_index_path):
         logger.warning(f"Image index not found: {image_index_path} — skipping image embedding.")
@@ -183,10 +194,43 @@ def embed_image_captions(image_index_path, collection_name):
         logger.info("No captioned images found in index — skipping image embedding.")
         return True
 
-    captions = [entry["caption"] for entry in image_index]
-    embeddings = get_embeddings_from_api(captions)
+    # The images are stored in a dir adjacent to the index json
+    # e.g. EXTRACT/images/filename_images/
+    img_dir_path = image_index_path.replace("_image_index.json", "_images")
+
+    enriched_texts = []
+    logger.info(f"Generating vision descriptions for {len(image_index)} images...")
+    
+    for entry in image_index:
+        img_filename = entry["filename"]
+        caption = entry.get("caption", "")
+        img_path = os.path.join(img_dir_path, img_filename)
+        
+        description = ""
+        if os.path.exists(img_path):
+            img_b64 = _image_to_base64(img_path)
+            if img_b64:
+                try:
+                    # Request visual description from model_api
+                    v_resp = requests.post(f"{MODEL_API_URL}/vision", json={"image_base64": img_b64}, timeout=60)
+                    if v_resp.status_code == 200:
+                        description = v_resp.json().get("description", "")
+                        logger.info(f"Vision description generated for {img_filename}")
+                except Exception as e:
+                    logger.warning(f"Vision description failed for {img_filename}: {e}")
+
+        # Combine caption and AI description for the search index
+        combined_text = f"Caption: {caption}\nVisual Description: {description}"
+        enriched_texts.append(combined_text)
+        # Store for metadata
+        entry["ai_description"] = description
+
+    if not enriched_texts:
+        return True
+
+    embeddings = get_embeddings_from_api(enriched_texts)
     if not embeddings:
-        logger.error("Failed to get embeddings for image captions.")
+        logger.error("Failed to get embeddings for enriched image data.")
         return False
 
     metadatas = [
@@ -194,12 +238,13 @@ def embed_image_captions(image_index_path, collection_name):
             "filename": entry["filename"],
             "page": entry["page"],
             "caption": entry["caption"],
+            "ai_description": entry.get("ai_description", "")[:500] # Limit size for metadata
         }
         for entry in image_index
     ]
 
     img_collection_name = f"{collection_name}_images"
-    logger.info(f"Storing {len(image_index)} image caption embeddings in '{img_collection_name}'...")
+    logger.info(f"Storing {len(image_index)} enriched image embeddings in '{img_collection_name}'...")
     try:
         client = chromadb.HttpClient(host=CHROMADB_HOST, port=CHROMADB_PORT)
         try:
@@ -208,11 +253,11 @@ def embed_image_captions(image_index_path, collection_name):
             pass
         collection = client.get_or_create_collection(name=img_collection_name)
         ids = [f"img_{i}" for i in range(len(image_index))]
-        collection.add(embeddings=embeddings, documents=captions, metadatas=metadatas, ids=ids)
-        logger.info(f"Image captions stored in ChromaDB collection '{img_collection_name}'.")
+        collection.add(embeddings=embeddings, documents=enriched_texts, metadatas=metadatas, ids=ids)
+        logger.info(f"Enriched image index stored in ChromaDB.")
         return True
     except Exception as e:
-        logger.error(f"Error storing image captions in ChromaDB: {e}", exc_info=True)
+        logger.error(f"Error storing image embeddings in ChromaDB: {e}", exc_info=True)
         return False
 
 

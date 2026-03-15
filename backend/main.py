@@ -314,6 +314,7 @@ async def ask_question(req: AskRequest):
                         "filename": meta["filename"],
                         "page": meta.get("page", 1),
                         "caption": meta.get("caption", ""),
+                        "ai_description": meta.get("ai_description", ""),
                     })
         except Exception:
             pass  # No image collection yet — skip silently

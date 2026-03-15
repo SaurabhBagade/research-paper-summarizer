@@ -14,6 +14,7 @@ interface RelevantImage {
   filename: string;
   page: number;
   caption: string;
+  ai_description?: string;
 }
 
 interface Message {
@@ -238,9 +239,15 @@ export function ChatView({ documentId, sessionId, initialMessages, onMessagesUpd
                                   <div className="w-28 h-24 rounded-lg overflow-hidden border border-gray-200 bg-gray-50 shadow-sm group-hover:shadow-md group-hover:ring-2 group-hover:ring-indigo-400 transition-all duration-200">
                                     <img
                                       src={`/api/images/${documentId}/${img.filename}`}
-                                      alt={img.caption}
+                                      alt={img.ai_description || img.caption}
+                                      title={img.ai_description ? `AI Description: ${img.ai_description}` : img.caption}
                                       className="w-full h-full object-contain"
                                     />
+                                    {img.ai_description && (
+                                      <div className="absolute top-1 right-1 bg-indigo-600 text-[8px] text-white px-1 rounded shadow-sm font-bold uppercase tracking-tighter">
+                                        AI Insight
+                                      </div>
+                                    )}
                                   </div>
                                   <p className="text-xs text-gray-500 max-w-[7rem] text-center leading-tight line-clamp-2 group-hover:text-indigo-600 transition-colors">
                                     {img.caption}

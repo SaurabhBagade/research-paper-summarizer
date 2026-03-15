@@ -115,7 +115,7 @@ def extract_image_index(pdf_path, output_img_dir, index_json_path):
         "caption": "Figure 3: Comparison of model accuracy..."
       },
       ...
-    ]
+    ]ṭ
     Images without a detectable caption are still saved but excluded from the index.
     """
     try:

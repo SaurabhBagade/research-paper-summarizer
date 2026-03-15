@@ -1,33 +1,26 @@
+import os
+import requests
+import base64
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional
 from sentence_transformers import SentenceTransformer
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 import torch
 
-app = FastAPI(title="Research Paper Summarizer Model API", version="1.0")
+app = FastAPI(title="Research Paper Summarizer Model API", version="1.1")
 
-# --- Model Loading ---
+# --- Configuration ---
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://ollama:11434")
+TEXT_MODEL = os.environ.get("TEXT_MODEL", "mistral")
+VISION_MODEL = os.environ.get("VISION_MODEL", "moondream")
+
+# --- Model Loading (Embeddings only) ---
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-if device == "cuda":
-    # User requested exactly 5GB limit in GPU
-    limit_bytes = 5 * 1024 * 1024 * 1024
-    total_memory = torch.cuda.get_device_properties(0).total_memory
-    if limit_bytes < total_memory:
-        fraction = limit_bytes / total_memory
-        torch.cuda.set_per_process_memory_fraction(fraction, 0)
-        print(f"Limiting CUDA memory to 5GB (Fraction: {fraction:.2f} of {total_memory / 1e9:.2f} GB)")
-
-# Note: Specter2 is designed for Scientific papers
 print("Loading Specter2 Embedding Model...")
+# Specter2 is designed for Scientific papers - keep it local for speed and precision
 embedder = SentenceTransformer('allenai/specter2_base', device=device)
-
-print("Loading Flan-T5 Generation Model...")
-# Use flan-t5-base for reasonable performance/size locally
-tokenizer = AutoTokenizer.from_pretrained('google/flan-t5-base')
-t5_model = AutoModelForSeq2SeqLM.from_pretrained('google/flan-t5-base').to(device)
-print("Models Loaded.")
+print("Specter2 Loaded.")
 
 # --- API Data Models ---
 class EmbedRequest(BaseModel):
@@ -43,43 +36,79 @@ class GenerateRequest(BaseModel):
 class GenerateResponse(BaseModel):
     generated_text: str
 
+class VisionRequest(BaseModel):
+    image_base64: str
+    prompt: Optional[str] = "Describe this figure or chart from a research paper in detail for a blind person. Focus on data points, trends, and labels."
+
+class VisionResponse(BaseModel):
+    description: str
+
 # --- Endpoints ---
 @app.post("/embed", response_model=EmbedResponse)
 def get_embeddings(request: EmbedRequest):
-    """
-    Takes a list of text chunks and returns Specter2 embeddings for each.
-    """
     try:
         if not request.texts:
             raise HTTPException(status_code=400, detail="No texts provided.")
-            
-        # Specter models often require specific prefixes like [CLS] but sentence-transformers handles it.
-        # Compute embeddings
         embeddings = embedder.encode(request.texts, show_progress_bar=False)
-        
-        # Convert to list of lists of floats for JSON serialization
-        embeddings_list = embeddings.tolist()
-        return {"embeddings": embeddings_list}
+        return {"embeddings": embeddings.tolist()}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/generate", response_model=GenerateResponse)
 def generate_text(request: GenerateRequest):
     """
-    Takes a prompt and uses T5 to generate text. Used for Summarization and Q&A.
+    Delegates high-level reasoning/generation to Ollama (Mistral).
     """
     try:
-        if not request.prompt:
-            raise HTTPException(status_code=400, detail="No prompt provided.")
-            
-        # Tokenize and generate
-        inputs = tokenizer(request.prompt, return_tensors="pt").to(device)
-        outputs = t5_model.generate(**inputs, max_length=request.max_length)
-        generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-        return {"generated_text": generated_text}
+        response = requests.post(
+            f"{OLLAMA_URL}/api/generate",
+            json={
+                "model": TEXT_MODEL,
+                "prompt": request.prompt,
+                "stream": False,
+                "options": {
+                    "num_predict": request.max_length
+                }
+            }
+        )
+        response.raise_for_status()
+        return {"generated_text": response.json()["response"]}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Ollama Error: {e}")
+        raise HTTPException(status_code=500, detail=f"Ollama generation failed: {e}")
+
+@app.post("/vision", response_model=VisionResponse)
+def describe_image(request: VisionRequest):
+    """
+    Uses Ollama's vision capabilities (Moondream) to describe figures.
+    """
+    try:
+        response = requests.post(
+            f"{OLLAMA_URL}/api/generate",
+            json={
+                "model": VISION_MODEL,
+                "prompt": request.prompt,
+                "images": [request.image_base64],
+                "stream": False
+            }
+        )
+        response.raise_for_status()
+        return {"description": response.json()["response"]}
+    except Exception as e:
+        print(f"Ollama Vision Error: {e}")
+        raise HTTPException(status_code=500, detail=f"Ollama vision task failed: {e}")
 
 @app.get("/health")
 def health_check():
-    return {"status": "healthy"}
+    # Check if Ollama is reachable
+    try:
+        requests.get(f"{OLLAMA_URL}/api/tags", timeout=2)
+        ollama_status = "connected"
+    except:
+        ollama_status = "disconnected"
+    
+    return {
+        "status": "healthy",
+        "device": device,
+        "ollama": ollama_status
+    }
