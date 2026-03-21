@@ -177,31 +177,34 @@ def _image_to_base64(image_path):
         return None
 
 
-def embed_image_captions(image_index_path, collection_name):
+async def embed_image_captions(document_id):
     """
-    Reads the image index JSON produced by extract_image_index(), enhances each
-    entry with a Vision AI description, and stores them in a separate ChromaDB
-    collection ({collection_name}_images).
+    Loads the image index from MongoDB, enhances each entry with a Vision AI description,
+    and stores them in a separate ChromaDB collection ({document_id}_images).
+    Saves the updated index back to MongoDB.
     """
-    if not os.path.exists(image_index_path):
-        logger.warning(f"Image index not found: {image_index_path} — skipping image embedding.")
-        return False
+    import db  # Import here to avoid circular import
 
-    with open(image_index_path, "r", encoding="utf-8") as f:
-        image_index = json.load(f)
-
+    # Load image index from MongoDB
+    image_index = await db.get_image_index(document_id)
     if not image_index:
-        logger.info("No captioned images found in index — skipping image embedding.")
+        logger.info("No images found in index — skipping image embedding.")
         return True
 
-    # The images are stored in a dir adjacent to the index json
-    # e.g. EXTRACT/images/filename_images/
-    img_dir_path = image_index_path.replace("_image_index.json", "_images")
+    # The images are stored in EXTRACT/images/{document_id}_images (mounted under /app/EXTRACT in Docker)
+    img_dir_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'EXTRACT', 'images', f"{document_id}_images")
+
+    if not os.path.isdir(img_dir_path):
+        logger.warning(
+            f"Image directory does not exist for document '{document_id}': {img_dir_path}. "
+            "Vision descriptions cannot be generated without images."
+        )
+        return True
 
     enriched_texts = []
     logger.info(f"Generating vision descriptions for {len(image_index)} images...")
     
-    for entry in image_index:
+    def process_image(entry):
         img_filename = entry["filename"]
         caption = entry.get("caption", "")
         img_path = os.path.join(img_dir_path, img_filename)
@@ -212,21 +215,55 @@ def embed_image_captions(image_index_path, collection_name):
             if img_b64:
                 try:
                     # Request visual description from model_api
-                    v_resp = requests.post(f"{MODEL_API_URL}/vision", json={"image_base64": img_b64}, timeout=60)
+                    v_resp = requests.post(f"{MODEL_API_URL}/vision", json={"image_base64": img_b64}, timeout=120)
                     if v_resp.status_code == 200:
-                        description = v_resp.json().get("description", "")
-                        logger.info(f"Vision description generated for {img_filename}")
+                        try:
+                            resp_json = v_resp.json()
+                        except ValueError:
+                            logger.warning(f"Vision API returned non-JSON for {img_filename}: {v_resp.text}")
+                            resp_json = {}
+
+                        # Support both current and potential old response shapes
+                        description = resp_json.get("description") or resp_json.get("response") or ""
+                        if not description:
+                            logger.warning(
+                                f"Vision API returned empty description for {img_filename}; full response: {resp_json}"
+                            )
+                        else:
+                            logger.info(f"Vision description generated for {img_filename} = {description[:50]}...")
+                    else:
+                        logger.warning(f"Vision API failed for {img_filename}: {v_resp.status_code} {v_resp.text}")
+                        description = ""
                 except Exception as e:
                     logger.warning(f"Vision description failed for {img_filename}: {e}")
+                    description = ""
+
+        if not description and caption:
+            # Fall back to caption if the model did not output anything
+            description = caption
+            logger.debug(f"Falling back to caption text for ai_description of {img_filename}")
 
         # Combine caption and AI description for the search index
         combined_text = f"Caption: {caption}\nVisual Description: {description}"
-        enriched_texts.append(combined_text)
         # Store for metadata
         entry["ai_description"] = description
+        logger.debug(f"Set ai_description for {img_filename}: '{description[:50]}...'")
+        return combined_text
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        enriched_texts = list(executor.map(process_image, image_index))
 
     if not enriched_texts:
         return True
+
+
+    # Save the updated index (with AI descriptions) to MongoDB even if embedding fails
+    try:
+        await db.save_image_index(document_id, image_index)
+        logger.info(f"Saved image index with AI descriptions to MongoDB for document '{document_id}'")
+    except Exception as e:
+        logger.warning(f"Failed to save image index to MongoDB for {document_id}: {e}")
 
     embeddings = get_embeddings_from_api(enriched_texts)
     if not embeddings:
@@ -243,8 +280,9 @@ def embed_image_captions(image_index_path, collection_name):
         for entry in image_index
     ]
 
-    img_collection_name = f"{collection_name}_images"
+    img_collection_name = f"{document_id}_images"
     logger.info(f"Storing {len(image_index)} enriched image embeddings in '{img_collection_name}'...")
+
     try:
         client = chromadb.HttpClient(host=CHROMADB_HOST, port=CHROMADB_PORT)
         try:
@@ -255,6 +293,11 @@ def embed_image_captions(image_index_path, collection_name):
         ids = [f"img_{i}" for i in range(len(image_index))]
         collection.add(embeddings=embeddings, documents=enriched_texts, metadatas=metadatas, ids=ids)
         logger.info(f"Enriched image index stored in ChromaDB.")
+
+        # Save the updated index back to MongoDB with ai_descriptions
+        await db.save_image_index(document_id, image_index)
+        logger.info(f"Updated image index with AI descriptions saved to MongoDB for {document_id}")
+
         return True
     except Exception as e:
         logger.error(f"Error storing image embeddings in ChromaDB: {e}", exc_info=True)
@@ -269,15 +312,39 @@ def process_and_embed(json_path, collection_name, blocks_json_path=None):
     logger.info(f"Starting embedding pipeline for: {json_path}")
 
     if not blocks_json_path or not os.path.exists(blocks_json_path):
-        logger.error("blocks_json_path is required but missing. Re-upload the PDF.")
-        return False
+        logger.warning("blocks_json_path missing; falling back to raw text chunking.")
+        pages_data = []
+    else:
+        pages_data = load_text_blocks(blocks_json_path)
 
-    pages_data = load_text_blocks(blocks_json_path)
     tagged_chunks = chunk_blocks(pages_data)
 
     if not tagged_chunks:
-        logger.warning("No chunks generated.")
-        return False
+        logger.warning("No chunks generated from blocks; falling back to raw text.")
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                raw_pages = json.load(f)
+        except Exception as e:
+            logger.error(f"Failed to load raw text JSON for fallback chunking: {e}")
+            return False
+
+        # Create a chunk per page (or per large paragraph) so we can still embed something
+        tagged_chunks = []
+        for page_num_str, page_text in raw_pages.items():
+            page_num = int(page_num_str)
+            if not page_text.strip():
+                continue
+            tagged_chunks.append({
+                "text": page_text.strip(),
+                "page_num": page_num,
+                "bbox": [0, 0, 0, 0],
+                "page_width": 0,
+                "page_height": 0,
+            })
+
+        if not tagged_chunks:
+            logger.error("Fallback chunking produced no text.")
+            return False
 
     texts = [c["text"] for c in tagged_chunks]
     embeddings = get_embeddings_from_api(texts)

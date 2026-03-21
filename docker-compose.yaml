@@ -43,6 +43,9 @@ services:
       - ./model_api/cache:/root/.cache
     environment:
       - HF_TOKEN=${HF_TOKEN}
+      - OLLAMA_URL=http://ollama:11434
+      - TEXT_MODEL=mistral
+      - VISION_MODEL=moondream
     deploy:
       resources:
         limits:
@@ -115,8 +118,14 @@ services:
       - "11434:11434"
     volumes:
       - ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_MAX_LOADED_MODELS=1
+      - OLLAMA_GPU_OVERHEAD=1000000000
+      - OLLAMA_CONTEXT_LENGTH=4k
     deploy:
       resources:
+        limits:
+          memory: 3G
         reservations:
           devices:
             - driver: nvidia

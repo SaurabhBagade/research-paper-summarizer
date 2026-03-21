@@ -65,10 +65,8 @@ def generate_text(request: GenerateRequest):
             json={
                 "model": TEXT_MODEL,
                 "prompt": request.prompt,
+                "max_tokens": request.max_length,
                 "stream": False,
-                "options": {
-                    "num_predict": request.max_length
-                }
             }
         )
         response.raise_for_status()

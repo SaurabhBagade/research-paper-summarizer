@@ -146,7 +146,7 @@ export function UploadView({ onUploadComplete }: UploadViewProps) {
         <div className="mt-8 grid grid-cols-1 md:grid-cols-3 gap-4">
           {[
             { icon: '📄', title: 'Upload PDF', desc: 'Any research paper' },
-            { icon: '🤖', title: 'AI Analysis', desc: 'FLAN-T5 powered' },
+            { icon: '🤖', title: 'AI Analysis', desc: 'Ollama (Mistral + Moondream) powered' },
             { icon: '💬', title: 'Ask Questions', desc: 'Get instant answers' },
           ].map((feature, i) => (
             <div

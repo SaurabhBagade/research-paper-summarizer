@@ -8,7 +8,7 @@ This project has been refactored from a heavy Apache Airflow distributed pipelin
 
 There are three primary containers:
 1. **`backend`**: A FastAPI orchestrator. It receives PDF uploads, handles the extraction (PyMuPDF, pdfplumber), chunks the text (Langchain), and coordinates with the other containers.
-2. **`model_api`**: A local Machine Learning API running on PyTorch/CUDA. It loads `allenai/specter2_base` for generating embeddings and `google/flan-t5-base` for text generation/summarization tasks.
+2. **`model_api`**: A local Machine Learning API running on PyTorch/CUDA. It loads `allenai/specter2_base` for generating embeddings and delegates text & vision generation to a local Ollama server (Mistral 7B + Moondream).
 3. **`chromadb`**: The local Vector Database where all embedded document chunks are persistently stored.
 
 ## 🚀 Getting Started
@@ -36,7 +36,7 @@ There are three primary containers:
    ```bash
    docker-compose up -d --build
    ```
-   *Note: On the very first boot, the `model_api` container will download the Specter2 and T5 models (~3-4 GB total) into the `model_api/cache` directory. Subsequent boots will be instantaneous.*
+   *Note: On the very first boot, the `model_api` container will download the Specter2 model (~1-2 GB) into the `model_api/cache` directory. Ollama will manage its own model downloads (e.g., Mistral 7B and Moondream) inside the `ollama` container.*
 
 4. **Verify it is running:**
    Check the status of the containers:
@@ -113,4 +113,4 @@ By default, the `docker-compose.yaml` expects an NVIDIA GPU. If you don't have o
 - **[Chroma](https://www.trychroma.com/)**: AI-native open-source vector database.
 - **[PyMuPDF (fitz)](https://pymupdf.readthedocs.io/) & [pdfplumber](https://github.com/jsvine/pdfplumber)**: PDF data extraction.
 - **[Sentence Transformers](https://www.sbert.net/)**: Local embeddings generation (Specter2).
-- **[Hugging Face Transformers](https://huggingface.co/docs/transformers/index)**: Local text generation (Flan-T5).
+- **[Ollama](https://ollama.com/)**: Local text and vision generation (Mistral 7B + Moondream).

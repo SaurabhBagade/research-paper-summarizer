@@ -42,6 +42,14 @@ os.makedirs(os.path.join(EXTRACT_DIR, 'text'), exist_ok=True)
 os.makedirs(os.path.join(EXTRACT_DIR, 'images'), exist_ok=True)
 os.makedirs(os.path.join(EXTRACT_DIR, 'tables'), exist_ok=True)
 
+# Tunable settings (can be overridden via environment variables)
+# How many top chunks to retrieve from Chroma for RAG context
+MAX_CONTEXT_CHUNKS = int(os.environ.get('MAX_CONTEXT_CHUNKS', '5'))
+# How many tokens we ask the generation model to produce
+MAX_GENERATE_TOKENS = int(os.environ.get('MAX_GENERATE_TOKENS', '512'))
+# How permissive to be when returning related images (higher returns more images)
+IMAGE_DISTANCE_THRESHOLD = float(os.environ.get('IMAGE_DISTANCE_THRESHOLD', '1.8'))
+
 @app.post("/upload-pdf")
 async def upload_pdf(file: UploadFile = File(...)):
     """
@@ -63,12 +71,20 @@ async def upload_pdf(file: UploadFile = File(...)):
 
     # 2. Extract Data
     base_name = os.path.splitext(file.filename)[0]
-    safe_col_name = ''.join(e for e in base_name if e.isalnum())
+
+    # Sanitize document IDs so we can consistently use them for collection names, folders, and lookups.
+    # This ensures the document_id always matches the folder used by embed_image_captions.
+    def _sanitize_id(name: str) -> str:
+        import re
+        sanitized = re.sub(r'[^0-9A-Za-z]+', '_', name).strip('_')
+        return sanitized or 'document'
+
+    safe_col_name = _sanitize_id(base_name)
     logger.info(f"Starting extraction for document ID: {safe_col_name}")
     
     # Text Extraction
-    text_json_path = os.path.join(EXTRACT_DIR, 'text', f"{base_name}.json")
-    blocks_json_path = os.path.join(EXTRACT_DIR, 'text', f"{base_name}_blocks.json")
+    text_json_path = os.path.join(EXTRACT_DIR, 'text', f"{safe_col_name}.json")
+    blocks_json_path = os.path.join(EXTRACT_DIR, 'text', f"{safe_col_name}_blocks.json")
     logger.info(f"[{safe_col_name}] Step 2a: Extracting Text...")
     extract_text(file_path, text_json_path)
 
@@ -76,10 +92,12 @@ async def upload_pdf(file: UploadFile = File(...)):
     extract_text_blocks(file_path, blocks_json_path)
 
     # Image Extraction + Caption Index (replaces plain extract_images)
-    img_dir_path = os.path.join(EXTRACT_DIR, 'images', f"{base_name}_images")
-    img_index_path = os.path.join(EXTRACT_DIR, 'images', f"{base_name}_image_index.json")
+    img_dir_path = os.path.join(EXTRACT_DIR, 'images', f"{safe_col_name}_images")
     logger.info(f"[{safe_col_name}] Step 2b: Extracting Images + Building Caption Index...")
-    extract_image_index(file_path, img_dir_path, img_index_path)
+    image_index = extract_image_index(file_path, img_dir_path, None)  # No JSON path
+
+    # Save image index to MongoDB
+    await db.save_image_index(safe_col_name, image_index)
 
     # Table Extraction — run with a timeout to avoid pdfplumber hanging on complex PDFs
     table_dir_path = os.path.join(EXTRACT_DIR, 'tables', f"{base_name}_tables")
@@ -100,7 +118,7 @@ async def upload_pdf(file: UploadFile = File(...)):
     # 4. Embed image captions for image retrieval (non-blocking — failure doesn't abort upload)
     logger.info(f"[{safe_col_name}] Step 3b: Embedding Image Captions...")
     try:
-        embed_image_captions(img_index_path, safe_col_name)
+        await embed_image_captions(safe_col_name)
     except Exception as e:
         logger.warning(f"[{safe_col_name}] Image caption embedding failed (non-critical): {e}")
     
@@ -163,7 +181,7 @@ async def ask_question(req: AskRequest):
     RAG Endpoint: 
     1. Embeds the user query.
     2. Searches ChromaDB for relevant context.
-    3. Sends the context + query to FLAN-T5 for an answer.
+    3. Sends the context + query to Ollama (Mistral) for an answer.
     """
     try:
         # 1. Embed the Question
@@ -182,7 +200,7 @@ async def ask_question(req: AskRequest):
 
         results = collection.query(
             query_embeddings=query_embedding,
-            n_results=3 # Get top 3 most relevant chunks
+            n_results=MAX_CONTEXT_CHUNKS  # Get top N relevant chunks for more prompt context
         )
         
         # 3. Compile Context
@@ -226,7 +244,10 @@ async def ask_question(req: AskRequest):
             )
         
         logger.info("Sending prompt to model_api /generate...")
-        response = requests.post(f"{MODEL_API_URL}/generate", json={"prompt": prompt, "max_length": 256})
+        response = requests.post(
+            f"{MODEL_API_URL}/generate",
+            json={"prompt": prompt, "max_length": MAX_GENERATE_TOKENS},
+        )
         response.raise_for_status()
         
         answer = response.json().get("generated_text", "Failed to generate text.")
@@ -304,18 +325,34 @@ async def ask_question(req: AskRequest):
                 n_results=2,
                 include=["metadatas", "distances"],
             )
+
+            candidates = []
             for meta, distance in zip(
                 img_results.get("metadatas", [[]])[0],
                 img_results.get("distances", [[]])[0],
             ):
+                if not meta or not meta.get("filename"):
+                    continue
+                candidates.append((distance, meta))
                 # Only include images that are semantically close (distance threshold)
-                if distance < 1.2 and meta.get("filename"):
+                if distance < IMAGE_DISTANCE_THRESHOLD:
                     relevant_images.append({
                         "filename": meta["filename"],
                         "page": meta.get("page", 1),
                         "caption": meta.get("caption", ""),
                         "ai_description": meta.get("ai_description", ""),
                     })
+
+            # If no image passed the threshold, still return the closest one to validate UI
+            if not relevant_images and candidates:
+                best_distance, best_meta = min(candidates, key=lambda x: x[0])
+                relevant_images.append({
+                    "filename": best_meta["filename"],
+                    "page": best_meta.get("page", 1),
+                    "caption": best_meta.get("caption", ""),
+                    "ai_description": best_meta.get("ai_description", ""),
+                    "distance": best_distance,
+                })
         except Exception:
             pass  # No image collection yet — skip silently
 

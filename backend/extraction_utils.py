@@ -125,6 +125,9 @@ def extract_image_index(pdf_path, output_img_dir, index_json_path):
         doc = fitz.open(pdf_path)
         index = []
 
+        total_images = 0
+        indexed_images = 0
+
         for page_idx, page in enumerate(doc):
             page_num = page_idx + 1
             all_blocks = page.get_text("blocks")
@@ -133,6 +136,7 @@ def extract_image_index(pdf_path, output_img_dir, index_json_path):
             # block = (x0, y0, x1, y1, text_or_name, block_no, block_type)
             text_blocks = [b for b in all_blocks if b[6] == 0 and b[4].strip()]
             image_list = page.get_images(full=True)
+            total_images += len(image_list)
 
             for img_idx, img in enumerate(image_list):
                 xref = img[0]
@@ -143,20 +147,20 @@ def extract_image_index(pdf_path, output_img_dir, index_json_path):
                 img_height = base_image.get("height", 0)
                 colorspace = base_image.get("colorspace", 1)
 
-                # ── Filter out junk images ──────────────────────────────────
-                # 1. Skip mask/alpha images (colorspace=0 means no real colour data)
-                if colorspace == 0:
-                    continue
-                # 2. Skip images that are too small to be real figures
-                if img_width < 100 or img_height < 100:
-                    continue
-                # 3. Skip nearly-empty images (< 2 KB encoded = blank/white)
-                if len(image_bytes) < 2048:
-                    continue
-                # ────────────────────────────────────────────────────────────
-
                 filename = f"page_{page_num}_img_{img_idx + 1}.{image_ext}"
                 image_path = os.path.join(output_img_dir, filename)
+
+                # Track why an image might be low-quality / non-figure
+                notes = []
+                if colorspace == 0:
+                    notes.append("mask/alpha")
+                if len(image_bytes) < 2048:
+                    notes.append("tiny-bytes")
+                if img_width < 100 or img_height < 100:
+                    notes.append("small-dims")
+
+                if notes:
+                    logger.debug(f"Indexing image {filename} with notes: {notes}")
 
                 with open(image_path, "wb") as f:
                     f.write(image_bytes)
@@ -170,41 +174,54 @@ def extract_image_index(pdf_path, output_img_dir, index_json_path):
                         break  # use first image block as approximate position
 
                 if img_bbox is None:
-                    continue
-
-                img_bottom = img_bbox[3]  # y1 of image — caption appears below this
+                    logger.debug(f"No bounding box found for {filename}; skipping caption search.")
+                    img_bottom = None
+                else:
+                    img_bottom = img_bbox[3]  # y1 of image — caption appears below this
 
                 # Find the closest text block BELOW the image (within 120pt)
                 caption = None
                 best_distance = float("inf")
-                for tb in text_blocks:
-                    tb_top = tb[1]   # y0 of text block
-                    tb_text = tb[4].strip()
-                    distance = tb_top - img_bottom
-                    # Must be below the image and not too far — and look like a caption
-                    if 0 < distance < 120 and distance < best_distance:
-                        # Prefer blocks that start with "Fig" / "Figure" / "Table"
-                        lower = tb_text.lower()
-                        if any(lower.startswith(kw) for kw in ("fig", "figure", "table", "chart", "plot", "diagram", "illustration")):
-                            caption = tb_text
-                            best_distance = distance
-                        elif best_distance == float("inf"):
-                            # Accept any nearby text as fallback caption
-                            caption = tb_text
-                            best_distance = distance
+                if img_bottom is not None:
+                    for tb in text_blocks:
+                        tb_top = tb[1]   # y0 of text block
+                        tb_text = tb[4].strip()
+                        distance = tb_top - img_bottom
+                        # Must be below the image and not too far — and look like a caption
+                        if 0 < distance < 120 and distance < best_distance:
+                            # Prefer blocks that start with "Fig" / "Figure" / "Table"
+                            lower = tb_text.lower()
+                            if any(lower.startswith(kw) for kw in ("fig", "figure", "table", "chart", "plot", "diagram", "illustration")):
+                                caption = tb_text
+                                best_distance = distance
+                            elif best_distance == float("inf"):
+                                # Accept any nearby text as fallback caption
+                                caption = tb_text
+                                best_distance = distance
+
+                # Always index the image, even if we didn’t find a caption;
+                # this ensures downstream embedding + retrieval works.
+                entry = {
+                    "filename": filename,
+                    "page": page_num,
+                    "caption": caption or "",
+                }
+                if notes:
+                    entry["notes"] = ", ".join(notes)
+
+                index.append(entry)
 
                 if caption:
-                    index.append({
-                        "filename": filename,
-                        "page": page_num,
-                        "caption": caption,
-                    })
                     logger.debug(f"  [{filename}] caption: {caption[:60]}...")
+                else:
+                    logger.debug(f"  [{filename}] no caption found, still indexing")
 
-        with open(index_json_path, "w", encoding="utf-8") as f:
-            json.dump(index, f, indent=2)
+        # with open(index_json_path, "w", encoding="utf-8") as f:
+        #     json.dump(index, f, indent=2)
 
-        logger.info(f"Image index saved: {len(index)} captioned images → {index_json_path}")
+        logger.info(
+            f"Image index built: {len(index)} images (out of {total_images} found)"
+        )
         return index
     except Exception as e:
         logger.error(f"Error building image index from {pdf_path}: {e}", exc_info=True)
