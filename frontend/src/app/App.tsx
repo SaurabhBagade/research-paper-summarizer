@@ -1,13 +1,14 @@
 import { useState, useEffect } from 'react';
-import { UploadView } from './components/UploadView';
-import { ChatView } from './components/ChatView';
 import { Sidebar, ChatSession } from './components/Sidebar';
+import { UploadView } from './components/UploadView';
+import { Workspace } from './components/Workspace';
 
-interface Message {
+export interface Message {
   id: string;
   type: 'user' | 'assistant';
   content: string;
   context?: string[];
+  relevant_images?: any[];
 }
 
 interface ChatSessionWithMessages extends ChatSession {
@@ -17,28 +18,25 @@ interface ChatSessionWithMessages extends ChatSession {
 const STORAGE_KEY = 'research-paper-chat-sessions';
 
 export default function App() {
-  const [sessions, setSessions] = useState<ChatSessionWithMessages[]>([]);
-  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
-  const [view, setView] = useState<'upload' | 'chat'>('chat');
+  const [sessions, setSessions] = useState<ChatSessionWithMessages[]>(() => {
+    try {
+      const stored = localStorage.getItem(STORAGE_KEY);
+      return stored ? JSON.parse(stored) : [];
+    } catch { return []; }
+  });
 
-  // Load sessions from localStorage on mount
-  useEffect(() => {
-    const stored = localStorage.getItem(STORAGE_KEY);
-    if (stored) {
-      try {
-        const parsedSessions = JSON.parse(stored);
-        setSessions(parsedSessions);
-      } catch (e) {
-        console.error('Failed to load sessions:', e);
-      }
-    }
-  }, []);
+  const [currentSessionId, setCurrentSessionId] = useState<string | null>(() => {
+    try {
+      const stored = localStorage.getItem(STORAGE_KEY);
+      const parsed = stored ? JSON.parse(stored) : [];
+      return parsed.length > 0 ? parsed[0].id : null;
+    } catch { return null; }
+  });
 
-  // Save sessions to localStorage whenever they change
+  const view = currentSessionId && sessions.find(s => s.id === currentSessionId) ? 'chat' : 'upload';
+
   useEffect(() => {
-    if (sessions.length > 0) {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(sessions));
-    }
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(sessions));
   }, [sessions]);
 
   const handleUploadComplete = (documentId: string, documentName: string) => {
@@ -53,25 +51,28 @@ export default function App() {
 
     setSessions((prev) => [newSession, ...prev]);
     setCurrentSessionId(newSession.id);
-    setView('chat');
+
+    fetch('/api/sessions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(newSession)
+    }).catch(() => {});
   };
 
   const handleNewChat = () => {
     setCurrentSessionId(null);
-    setView('upload');
   };
 
   const handleSelectSession = (sessionId: string) => {
     setCurrentSessionId(sessionId);
-    setView('chat');
   };
 
   const handleDeleteSession = (sessionId: string) => {
     setSessions((prev) => prev.filter((s) => s.id !== sessionId));
     if (currentSessionId === sessionId) {
       setCurrentSessionId(null);
-      setView('upload');
     }
+    fetch(`/api/sessions/${sessionId}`, { method: 'DELETE' }).catch(() => {});
   };
 
   const handleUpdateMessages = (sessionId: string, messages: Message[]) => {
@@ -85,12 +86,10 @@ export default function App() {
   };
 
   const currentSession = sessions.find((s) => s.id === currentSessionId);
-
-  // Show sidebar only when we have sessions or in chat view
-  const showSidebar = sessions.length > 0 || view === 'chat';
+  const showSidebar = sessions.length > 0;
 
   return (
-    <div className="size-full flex">
+    <div className="size-full flex overflow-hidden">
       {showSidebar && (
         <Sidebar
           sessions={sessions}
@@ -100,18 +99,21 @@ export default function App() {
           onDeleteSession={handleDeleteSession}
         />
       )}
-      <div className="flex-1 min-w-0">
+      <div className="flex-1 min-w-0 h-full">
         {view === 'upload' ? (
           <UploadView onUploadComplete={handleUploadComplete} />
         ) : currentSession ? (
-          <ChatView
+          <Workspace
+            key={currentSession.id}
             documentId={currentSession.documentId}
             sessionId={currentSession.id}
             initialMessages={currentSession.messages}
             onMessagesUpdate={handleUpdateMessages}
             onNewChat={handleNewChat}
           />
-        ) : null}
+        ) : (
+          <UploadView onUploadComplete={handleUploadComplete} />
+        )}
       </div>
     </div>
   );

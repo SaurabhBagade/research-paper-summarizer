@@ -17,6 +17,20 @@ services:
     networks:
       - app_network
 
+  mongodb:
+    image: mongo:7
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    networks:
+      - app_network
+
   model_api:
     build: 
       context: ./model_api
@@ -33,6 +47,7 @@ services:
       resources:
         limits:
           memory: 4G
+      # NOTE: No GPU reservation — CPU-only mode
     restart: always
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://localhost:8000/health"]
@@ -43,7 +58,7 @@ services:
     networks:
       - app_network
 
-  # The new backend orchestration
+  # The backend orchestration
   backend:
     build:
       context: ./backend
@@ -54,6 +69,7 @@ services:
       - CHROMADB_HOST=chromadb
       - CHROMADB_PORT=8000
       - MODEL_API_URL=http://model_api:8000
+      - MONGO_URI=mongodb://mongodb:27017
     volumes:
       - ./backend:/app
       - ./EXTRACT:/app/EXTRACT
@@ -66,10 +82,11 @@ services:
     depends_on:
       - chromadb
       - model_api
+      - mongodb
     networks:
       - app_network
 
-  # The new React frontend
+  # The React frontend
   frontend:
     build:
       context: ./frontend
@@ -93,3 +110,6 @@ services:
 networks:
   app_network:
     driver: bridge
+
+volumes:
+  mongodb_data:
