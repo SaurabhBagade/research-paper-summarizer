@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { Sidebar, ChatSession } from './components/Sidebar';
 import { UploadView } from './components/UploadView';
 import { Workspace } from './components/Workspace';
+import apiClient from './api/client';
 
 export interface Message {
   id: string;
@@ -15,9 +16,8 @@ interface ChatSessionWithMessages extends ChatSession {
   messages: Message[];
 }
 
-const STORAGE_KEY = 'research-paper-chat-sessions';
-
 export default function App() {
+  const STORAGE_KEY = 'research-paper-chat-sessions';
   const [sessions, setSessions] = useState<ChatSessionWithMessages[]>(() => {
     try {
       const stored = localStorage.getItem(STORAGE_KEY);
@@ -56,7 +56,7 @@ export default function App() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(newSession)
-    }).catch(() => {});
+    }).catch(() => { });
   };
 
   const handleNewChat = () => {
@@ -72,7 +72,7 @@ export default function App() {
     if (currentSessionId === sessionId) {
       setCurrentSessionId(null);
     }
-    fetch(`/api/sessions/${sessionId}`, { method: 'DELETE' }).catch(() => {});
+    fetch(`/api/sessions/${sessionId}`, { method: 'DELETE' }).catch(() => { });
   };
 
   const handleUpdateMessages = (sessionId: string, messages: Message[]) => {
@@ -107,7 +107,7 @@ export default function App() {
             key={currentSession.id}
             documentId={currentSession.documentId}
             sessionId={currentSession.id}
-            initialMessages={currentSession.messages}
+            initialMessages={currentSession.messages || []}
             onMessagesUpdate={handleUpdateMessages}
             onNewChat={handleNewChat}
           />

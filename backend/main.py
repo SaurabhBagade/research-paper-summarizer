@@ -6,6 +6,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 import uvicorn
+import re
 
 from extraction_utils import extract_text, extract_images, extract_tables, extract_text_blocks, extract_image_index
 from embedding_utils import process_and_embed, embed_image_captions, get_embeddings_from_api, CHROMADB_HOST, CHROMADB_PORT, MODEL_API_URL
@@ -42,10 +43,21 @@ os.makedirs(os.path.join(EXTRACT_DIR, 'text'), exist_ok=True)
 os.makedirs(os.path.join(EXTRACT_DIR, 'images'), exist_ok=True)
 os.makedirs(os.path.join(EXTRACT_DIR, 'tables'), exist_ok=True)
 
-# Tunable RAG Settings restored from upstream
+# Tunable settings (can be overridden via environment variables)
+# How many top chunks to retrieve from Chroma for RAG context
 MAX_CONTEXT_CHUNKS = int(os.environ.get('MAX_CONTEXT_CHUNKS', '5'))
+# How many tokens we ask the generation model to produce
 MAX_GENERATE_TOKENS = int(os.environ.get('MAX_GENERATE_TOKENS', '512'))
+# How permissive to be when returning related images (higher returns more images)
 IMAGE_DISTANCE_THRESHOLD = float(os.environ.get('IMAGE_DISTANCE_THRESHOLD', '1.8'))
+
+def sanitize_document_id(name: str) -> str:
+    """
+    Sanitize document IDs so we can consistently use them for collection names,
+    folders, and lookups. Replaces non-alphanumeric with underscores.
+    """
+    sanitized = re.sub(r'[^0-9A-Za-z]+', '_', name).strip('_')
+    return sanitized or 'document'
 
 @app.post("/upload-pdf")
 async def upload_pdf(file: UploadFile = File(...)):
@@ -68,14 +80,10 @@ async def upload_pdf(file: UploadFile = File(...)):
 
     # 2. Extract Data
     base_name = os.path.splitext(file.filename)[0]
-    
-    # Robust URL-safe sanitization
-    def _sanitize_id(name: str) -> str:
-        import re
-        sanitized = re.sub(r'[^0-9A-Za-z]+', '_', name).strip('_')
-        return sanitized or 'document'
-        
-    safe_col_name = _sanitize_id(base_name)
+    safe_col_name = sanitize_document_id(base_name)
+
+    # Save mapping of sanitized ID to original filename
+    await db.save_document_metadata(safe_col_name, file.filename)
     logger.info(f"Starting extraction for document ID: {safe_col_name}")
     
     # Text Extraction
@@ -89,11 +97,10 @@ async def upload_pdf(file: UploadFile = File(...)):
 
     # Image Extraction + Caption Index (replaces plain extract_images)
     img_dir_path = os.path.join(EXTRACT_DIR, 'images', f"{safe_col_name}_images")
-    img_index_path = os.path.join(EXTRACT_DIR, 'images', f"{safe_col_name}_image_index.json")
     logger.info(f"[{safe_col_name}] Step 2b: Extracting Images + Building Caption Index...")
-    image_index = extract_image_index(file_path, img_dir_path, img_index_path)
+    image_index = extract_image_index(file_path, img_dir_path, None)  # No JSON path
 
-    # Restore upstream MongoDB state preservation
+    # Save image index to MongoDB
     await db.save_image_index(safe_col_name, image_index)
 
     # Table Extraction — run with a timeout to avoid pdfplumber hanging on complex PDFs
@@ -112,10 +119,10 @@ async def upload_pdf(file: UploadFile = File(...)):
     logger.info(f"[{safe_col_name}] Step 3a: Chunking and Embedding Text...")
     success = process_and_embed(text_json_path, safe_col_name, blocks_json_path=blocks_json_path)
 
-    # 4. Embed image captions for image retrieval (CPU-only: caption text only, no vision AI)
+    # 4. Embed image captions for image retrieval (non-blocking — failure doesn't abort upload)
     logger.info(f"[{safe_col_name}] Step 3b: Embedding Image Captions...")
     try:
-        embed_image_captions(img_index_path, safe_col_name)
+        await embed_image_captions(safe_col_name)
     except Exception as e:
         logger.warning(f"[{safe_col_name}] Image caption embedding failed (non-critical): {e}")
     
@@ -178,8 +185,7 @@ async def ask_question(req: AskRequest):
     RAG Endpoint: 
     1. Embeds the user query.
     2. Searches ChromaDB for relevant context.
-    3. Sends context + query to local Flan-T5 for an answer (CPU-only).
-    4. Returns answer with PDF highlight coordinates and relevant figures.
+    3. Sends the context + query to Ollama (Mistral) for an answer.
     """
     try:
         # 1. Embed the Question
@@ -198,7 +204,7 @@ async def ask_question(req: AskRequest):
 
         results = collection.query(
             query_embeddings=query_embedding,
-            n_results=MAX_CONTEXT_CHUNKS
+            n_results=MAX_CONTEXT_CHUNKS  # Get top N relevant chunks for more prompt context
         )
         
         # 3. Compile Context
@@ -206,18 +212,19 @@ async def ask_question(req: AskRequest):
             return {"answer": "I could not find relevant information in the document to answer your question.", "context": []}
             
         context_chunks = results['documents'][0]
-        context_metadata = results.get('metadatas', [[]])[0]
+        # Extract page numbers from chunk metadata for the highlight feature
+        context_metadata = results.get('metadatas', [[]])[0]  # list of metadata dicts
         context_pages = list(dict.fromkeys(
             m.get('page_num', 1) for m in context_metadata if m
-        ))
+        ))  # deduplicated, ordered page numbers
         context_text = "\n\n".join(context_chunks)
         
-        # 4. Fetch last 6 messages (3 turns) from session history
+        # 4. Fetch last 6 messages (3 turns) from session history to give model context
         HISTORY_TURNS = 3
         history_text = ""
         session = await db.get_session(req.session_id)
         if session and session.get("messages"):
-            recent_messages = session["messages"][-(HISTORY_TURNS * 2):]
+            recent_messages = session["messages"][-(HISTORY_TURNS * 2):]  # last N turns = N*2 messages
             history_lines = []
             for msg in recent_messages:
                 role = "User" if msg.get("type") == "user" else "Assistant"
@@ -225,7 +232,7 @@ async def ask_question(req: AskRequest):
             history_text = "\n".join(history_lines)
             logger.info(f"Injecting {len(recent_messages)} history messages into prompt.")
         
-        # 5. Build the prompt
+        # 5. Build the prompt — include history only if it exists
         if history_text:
             prompt = (
                 f"You are a helpful research assistant. Use the provided paper context to answer the question.\n\n"
@@ -240,9 +247,11 @@ async def ask_question(req: AskRequest):
                 f"User: {req.query}\nAssistant:"
             )
         
-        # 6. Generate answer via local Flan-T5 (CPU-only — no Ollama needed)
-        logger.info("Sending prompt to model_api /generate (Flan-T5 CPU)...")
-        response = requests.post(f"{MODEL_API_URL}/generate", json={"prompt": prompt, "max_length": MAX_GENERATE_TOKENS})
+        logger.info("Sending prompt to model_api /generate...")
+        response = requests.post(
+            f"{MODEL_API_URL}/generate",
+            json={"prompt": prompt, "max_length": MAX_GENERATE_TOKENS},
+        )
         response.raise_for_status()
         
         answer = response.json().get("generated_text", "Failed to generate text.")
@@ -250,19 +259,22 @@ async def ask_question(req: AskRequest):
         # Save messages to database
         user_msg = {"id": str(len(context_chunks) + req.query.__hash__()), "type": "user", "content": req.query}
         assistant_msg = {"id": str(len(context_chunks) + answer.__hash__()), "type": "assistant", "content": answer, "context": context_chunks}
+        
+        # We need to map role back to 'type' since frontend uses type: 'user' | 'assistant'
         await db.add_messages_to_session(req.session_id, [user_msg, assistant_msg])
 
-        # 7. Sentence-level highlighting: search for context sentences in the actual PDF
+        # Sentence-level highlighting: split each context chunk into sentences,
+        # search for each in the PDF page → get one rect per matching line (marker effect).
+        # Falls back to stored union bbox if the PDF cannot be opened.
         import re, fitz as _fitz
 
         context_highlights = []
         _pdf_path = None
-        for _fname in os.listdir(DATA_DIR):
-            if _fname.lower().endswith(".pdf"):
-                _safe = ''.join(e for e in os.path.splitext(_fname)[0] if e.isalnum())
-                if _safe == req.document_id:
-                    _pdf_path = os.path.join(DATA_DIR, _fname)
-                    break
+        
+        # Look up original filename from metadata
+        _doc_meta = await db.get_document_metadata(req.document_id)
+        if _doc_meta and _doc_meta.get("filename"):
+            _pdf_path = os.path.join(DATA_DIR, _doc_meta["filename"])
 
         if _pdf_path:
             try:
@@ -275,7 +287,7 @@ async def ask_question(req: AskRequest):
                     page_width = page.rect.width
                     page_height = page.rect.height
 
-                    # Split chunk into sentences; search each >=5-word sentence
+                    # Split chunk into sentences; search each ≥5-word sentence
                     sentences = re.split(r'(?<=[.!?])\s+', chunk_text)
                     all_rects = []
                     for sent in sentences:
@@ -293,7 +305,7 @@ async def ask_question(req: AskRequest):
                             "page_height": page_height,
                         })
                     else:
-                        # Fallback: use stored union bbox from chunk metadata
+                        # Fallback: use stored union bbox
                         bbox_x1 = meta.get('bbox_x1', 0)
                         bbox_y1 = meta.get('bbox_y1', 0)
                         if bbox_x1 > 0 and bbox_y1 > 0:
@@ -307,7 +319,7 @@ async def ask_question(req: AskRequest):
             except Exception as _e:
                 logger.warning(f"Sentence-level highlight extraction failed: {_e}")
 
-        # 8. Query image collection for relevant figures
+        # 4c. Query image collection for relevant figures (based on same query embedding)
         relevant_images = []
         try:
             img_collection = client.get_collection(name=f"{req.document_id}_images")
@@ -316,17 +328,34 @@ async def ask_question(req: AskRequest):
                 n_results=2,
                 include=["metadatas", "distances"],
             )
+
+            candidates = []
             for meta, distance in zip(
                 img_results.get("metadatas", [[]])[0],
                 img_results.get("distances", [[]])[0],
             ):
-                if distance < IMAGE_DISTANCE_THRESHOLD and meta.get("filename"):
+                if not meta or not meta.get("filename"):
+                    continue
+                candidates.append((distance, meta))
+                # Only include images that are semantically close (distance threshold)
+                if distance < IMAGE_DISTANCE_THRESHOLD:
                     relevant_images.append({
                         "filename": meta["filename"],
                         "page": meta.get("page", 1),
                         "caption": meta.get("caption", ""),
                         "ai_description": meta.get("ai_description", ""),
                     })
+
+            # If no image passed the threshold, still return the closest one to validate UI
+            if not relevant_images and candidates:
+                best_distance, best_meta = min(candidates, key=lambda x: x[0])
+                relevant_images.append({
+                    "filename": best_meta["filename"],
+                    "page": best_meta.get("page", 1),
+                    "caption": best_meta.get("caption", ""),
+                    "ai_description": best_meta.get("ai_description", ""),
+                    "distance": best_distance,
+                })
         except Exception:
             pass  # No image collection yet — skip silently
 
@@ -348,31 +377,51 @@ async def ask_question(req: AskRequest):
 def serve_image(document_id: str, filename: str):
     """
     Serves an extracted figure image file so the frontend can display it.
+    Uses the sanitized document_id directly to locate the directory.
     """
+    img_path = os.path.join(EXTRACT_DIR, 'images', f"{document_id}_images", filename)
+    if os.path.exists(img_path):
+        return FileResponse(path=img_path)
+    
+    # Fallback to scanning if it's an old document before the standardized naming
     for base_name in os.listdir(os.path.join(EXTRACT_DIR, 'images')):
-        safe = ''.join(e for e in base_name.replace('_images', '') if e.isalnum())
+        safe = sanitize_document_id(base_name.replace('_images', ''))
         if safe == document_id:
-            img_path = os.path.join(EXTRACT_DIR, 'images', base_name, filename)
-            if os.path.exists(img_path):
-                return FileResponse(path=img_path)
+            old_path = os.path.join(EXTRACT_DIR, 'images', base_name, filename)
+            if os.path.exists(old_path):
+                return FileResponse(path=old_path)
+                
     raise HTTPException(status_code=404, detail=f"Image '{filename}' not found for document '{document_id}'.")
 
 
 @app.get("/pdf/{document_id}")
-def serve_pdf(document_id: str):
+async def serve_pdf(document_id: str):
     """
     Serves the raw PDF file so the frontend PDF viewer can render it.
+    Uses database metadata to find the original filename.
     """
-    for filename in os.listdir(DATA_DIR):
-        if filename.lower().endswith(".pdf"):
-            safe = ''.join(e for e in os.path.splitext(filename)[0] if e.isalnum())
-            if safe == document_id:
-                return FileResponse(
-                    path=os.path.join(DATA_DIR, filename),
-                    media_type="application/pdf",
-                    filename=filename,
-                )
-    raise HTTPException(status_code=404, detail=f"PDF for document '{document_id}' not found.")
+    doc_meta = await db.get_document_metadata(document_id)
+    if not doc_meta or not doc_meta.get("filename"):
+        # Fallback to scanning for older documents
+        for filename in os.listdir(DATA_DIR):
+            if filename.lower().endswith(".pdf"):
+                if sanitize_document_id(os.path.splitext(filename)[0]) == document_id:
+                    return FileResponse(
+                        path=os.path.join(DATA_DIR, filename),
+                        media_type="application/pdf",
+                        filename=filename,
+                    )
+        raise HTTPException(status_code=404, detail=f"PDF for document '{document_id}' not found.")
+
+    file_path = os.path.join(DATA_DIR, doc_meta["filename"])
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail=f"PDF file '{doc_meta['filename']}' not found on disk.")
+
+    return FileResponse(
+        path=file_path,
+        media_type="application/pdf",
+        filename=doc_meta["filename"],
+    )
 
 @app.get("/health")
 def health_check():

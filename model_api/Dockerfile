@@ -1,20 +1,21 @@
-# CPU-only build (no NVIDIA GPU required)
-FROM python:3.10-slim
+# Use Official PyTorch image with CUDA support
+FROM pytorch/pytorch:2.10.0-cuda13.0-cudnn9-runtime
 
 WORKDIR /app
 
 # System dependencies
 RUN apt-get update && apt-get install -y \
     build-essential \
-    curl \
+    python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
-# Install PyTorch CPU-only version first (avoids pulling the ~2GB CUDA variant)
-RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+# Create virtual environment
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
 
 COPY requirements.txt .
 
-# Install remaining dependencies
+# Install dependencies in virtual environment
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Add HuggingFace token as a build argument
