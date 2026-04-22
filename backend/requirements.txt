@@ -2,8 +2,13 @@ fastapi
 uvicorn
 python-multipart
 requests
-chromadb
 pymupdf
 pdfplumber
-motor
 nltk
+psycopg2-binary
+asyncpg
+sqlalchemy
+alembic
+pgvector
+celery
+redis

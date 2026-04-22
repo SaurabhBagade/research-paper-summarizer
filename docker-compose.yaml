@@ -1,14 +1,14 @@
 services:
-  chromadb:
-    image: chromadb/chroma:1.5.3.dev5
+  postgres:
+    image: pgvector/pgvector:pg16-trixie
     ports:
-      - "8000:8000"
+      - "5432:5432"
     environment:
-      - IS_PERSISTENT=TRUE
-      - PERSIST_DIRECTORY=/chroma/chroma
-      - ALLOW_RESET=TRUE
+      POSTGRES_USER: research_user
+      POSTGRES_PASSWORD: secure_password
+      POSTGRES_DB: research_db
     volumes:
-      - ./EXTRACT/vectorstore:/chroma/chroma
+      - postgres_data:/var/lib/postgresql/data
     restart: always
     deploy:
       resources:
@@ -17,17 +17,15 @@ services:
     networks:
       - app_network
 
-  mongodb:
-    image: mongo:8.2-rc
+  redis:
+    image: redis:alpine
     ports:
-      - "27017:27017"
-    volumes:
-      - mongodb_data:/data/db
+      - "6379:6379"
     restart: always
     deploy:
       resources:
         limits:
-          memory: 1G
+          memory: 512M
     networks:
       - app_network
 
@@ -73,10 +71,9 @@ services:
       - "8080:8080"
     environment:
       # URLs to speak to other containers
-      - CHROMADB_HOST=chromadb
-      - CHROMADB_PORT=8000
       - MODEL_API_URL=http://model_api:8000
-      - MONGO_URI=mongodb://mongodb:27017
+      - DATABASE_URL=postgresql+psycopg2://research_user:secure_password@postgres:5432/research_db
+      - REDIS_URL=redis://redis:6379/0
     volumes:
       - ./backend:/app
       - ./EXTRACT:/app/EXTRACT
@@ -87,9 +84,33 @@ services:
         limits:
           memory: 1G
     depends_on:
-      - chromadb
+      - postgres
       - model_api
-      - mongodb
+      - redis
+    networks:
+      - app_network
+
+  celery_worker:
+    build:
+      context: ./backend
+    command: celery -A worker.celery_app worker --loglevel=info
+    environment:
+      - DATABASE_URL=postgresql+psycopg2://research_user:secure_password@postgres:5432/research_db
+      - REDIS_URL=redis://redis:6379/0
+      - MODEL_API_URL=http://model_api:8000
+    volumes:
+      - ./backend:/app
+      - ./EXTRACT:/app/EXTRACT
+      - ./data_pdf:/app/data_pdf
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+    depends_on:
+      - postgres
+      - redis
+      - model_api
     networks:
       - app_network
 
@@ -142,7 +163,7 @@ networks:
     driver: bridge
 
 volumes:
-  mongodb_data:
+  postgres_data:
   ollama_data:
 
 

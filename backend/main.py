@@ -2,18 +2,17 @@ import os
 import shutil
 import logging
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 import uvicorn
 import re
-
-from extraction_utils import extract_text, extract_images, extract_tables, extract_text_blocks, extract_image_index
-from embedding_utils import process_and_embed, embed_image_captions, get_embeddings_from_api, CHROMADB_HOST, CHROMADB_PORT, MODEL_API_URL
-from pydantic import BaseModel
-import chromadb
 import requests
 import db
+import init_db
+from pydantic import BaseModel
+from worker import process_pdf_task, celery_app
+from embedding_utils import get_embeddings_from_api, MODEL_API_URL
 
 # Configure Logging
 logging.basicConfig(
@@ -24,6 +23,12 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Research Paper Summarizer API")
 
+@app.on_event("startup")
+async def startup_event():
+    """Initialize database tables and extensions on boot."""
+    logger.info("Initializing database...")
+    await init_db.init_db()
+    
 # Allow requests from a frontend
 app.add_middleware(
     CORSMiddleware,
@@ -51,6 +56,31 @@ MAX_GENERATE_TOKENS = int(os.environ.get('MAX_GENERATE_TOKENS', '512'))
 # How permissive to be when returning related images (higher returns more images)
 IMAGE_DISTANCE_THRESHOLD = float(os.environ.get('IMAGE_DISTANCE_THRESHOLD', '1.8'))
 
+@app.post("/api/notebooks")
+async def create_notebook(req: dict):
+    title = req.get("title", "New Notebook")
+    description = req.get("description", "")
+    color = req.get("color", "#3B82F6")
+    nb = await db.create_notebook(title, description, color)
+    return {"status": "success", "notebook": nb}
+
+@app.get("/api/notebooks")
+async def get_notebooks():
+    nbs = await db.get_notebooks()
+    return {"notebooks": nbs}
+
+@app.get("/api/notebooks/{notebook_id}")
+async def get_notebook(notebook_id: str):
+    nb = await db.get_notebook(notebook_id)
+    if not nb:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+    return {"notebook": nb}
+
+@app.get("/api/notebooks/{notebook_id}/sources")
+async def get_notebook_sources(notebook_id: str):
+    sources = await db.get_sources(notebook_id)
+    return {"sources": sources}
+
 def sanitize_document_id(name: str) -> str:
     """
     Sanitize document IDs so we can consistently use them for collection names,
@@ -59,10 +89,11 @@ def sanitize_document_id(name: str) -> str:
     sanitized = re.sub(r'[^0-9A-Za-z]+', '_', name).strip('_')
     return sanitized or 'document'
 
-@app.post("/upload-pdf")
-async def upload_pdf(file: UploadFile = File(...)):
+@app.post("/api/upload-pdf")
+async def upload_pdf(file: UploadFile = File(...), notebook_id: str = Form(None)):
     """
     Endpoint to receive a PDF, save it, and trigger the extraction & embedding pipeline.
+    Optionally tie it to a notebook.
     """
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="File must be a PDF")
@@ -78,70 +109,39 @@ async def upload_pdf(file: UploadFile = File(...)):
         logger.error(f"Failed to save file {file.filename}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to save file: {e}")
 
-    # 2. Extract Data
+    # 2. Extract Data via Celery worker
     base_name = os.path.splitext(file.filename)[0]
     safe_col_name = sanitize_document_id(base_name)
 
-    # Save mapping of sanitized ID to original filename
+    # Save mapping of sanitized ID to original filename immediately so frontend knows it exists
     await db.save_document_metadata(safe_col_name, file.filename)
-    logger.info(f"Starting extraction for document ID: {safe_col_name}")
-    
-    # Text Extraction
-    text_json_path = os.path.join(EXTRACT_DIR, 'text', f"{safe_col_name}.json")
-    blocks_json_path = os.path.join(EXTRACT_DIR, 'text', f"{safe_col_name}_blocks.json")
-    logger.info(f"[{safe_col_name}] Step 2a: Extracting Text...")
-    extract_text(file_path, text_json_path)
+    logger.info(f"Dispatching Celery task for document ID: {safe_col_name} to Notebook: {notebook_id}")
 
-    logger.info(f"[{safe_col_name}] Step 2a+: Extracting Text Blocks with Coordinates...")
-    extract_text_blocks(file_path, blocks_json_path)
-
-    # Image Extraction + Caption Index (replaces plain extract_images)
-    img_dir_path = os.path.join(EXTRACT_DIR, 'images', f"{safe_col_name}_images")
-    logger.info(f"[{safe_col_name}] Step 2b: Extracting Images + Building Caption Index...")
-    image_index = extract_image_index(file_path, img_dir_path, None)  # No JSON path
-
-    # Save image index to MongoDB
-    await db.save_image_index(safe_col_name, image_index)
-
-    # Table Extraction — run with a timeout to avoid pdfplumber hanging on complex PDFs
-    table_dir_path = os.path.join(EXTRACT_DIR, 'tables', f"{base_name}_tables")
-    logger.info(f"[{safe_col_name}] Step 2c: Extracting Tables (60s timeout)...")
-    try:
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(extract_tables, file_path, table_dir_path)
-            future.result(timeout=60)
-    except FutureTimeoutError:
-        logger.warning(f"[{safe_col_name}] Table extraction timed out after 60s — skipping tables.")
-    except Exception as e:
-        logger.warning(f"[{safe_col_name}] Table extraction failed: {e} — skipping tables.")
-
-    # 3. Vectorization (Chunk & Embed) — text chunks with bbox coords
-    logger.info(f"[{safe_col_name}] Step 3a: Chunking and Embedding Text...")
-    success = process_and_embed(text_json_path, safe_col_name, blocks_json_path=blocks_json_path)
-
-    # 4. Embed image captions for image retrieval (non-blocking — failure doesn't abort upload)
-    logger.info(f"[{safe_col_name}] Step 3b: Embedding Image Captions...")
-    try:
-        await embed_image_captions(safe_col_name)
-    except Exception as e:
-        logger.warning(f"[{safe_col_name}] Image caption embedding failed (non-critical): {e}")
-    
-    if not success:
-        logger.error(f"[{safe_col_name}] Pipeline failed during embedding phase.")
-        return {"status": "partial_success", "message": "Extraction succeeded, but embedding failed. Check backend logs.", "document_id": safe_col_name}
-
-    logger.info(f"[{safe_col_name}] Pipeline completed successfully.")
+    task = process_pdf_task.delay(safe_col_name, file.filename, notebook_id)
 
     return {
         "status": "success", 
-        "message": f"{file.filename} processed and embedded successfully.",
-        "document_id": safe_col_name
+        "message": f"{file.filename} is processing in the background.",
+        "document_id": safe_col_name,
+        "notebook_id": notebook_id,
+        "task_id": task.id
     }
+
+@app.get("/api/tasks/{task_id}")
+async def get_task_status(task_id: str):
+    task_result = celery_app.AsyncResult(task_id)
+    result = {
+        "task_id": task_id,
+        "task_status": task_result.status,
+        "task_result": task_result.result if task_result.status == 'SUCCESS' else None
+    }
+    return result
 
 class AskRequest(BaseModel):
     query: str
-    document_id: str
-    session_id: str
+    document_id: str | None = None
+    notebook_id: str | None = None
+    session_id: str | None = None
 
 class SessionCreate(BaseModel):
     id: str
@@ -151,7 +151,7 @@ class SessionCreate(BaseModel):
     messageCount: int = 0
     messages: list = []
 
-@app.post("/sessions")
+@app.post("/api/sessions")
 async def create_new_session(req: SessionCreate):
     session = await db.create_session(
         req.id,
@@ -161,25 +161,25 @@ async def create_new_session(req: SessionCreate):
     )
     return session
 
-@app.get("/sessions")
+@app.get("/api/sessions")
 async def get_sessions():
     sessions = await db.get_all_sessions()
     return sessions
 
-@app.get("/sessions/{session_id}")
+@app.get("/api/sessions/{session_id}")
 async def get_session_by_id(session_id: str):
     session = await db.get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     return session
 
-@app.delete("/sessions/{session_id}")
+@app.delete("/api/sessions/{session_id}")
 async def remove_session(session_id: str):
     await db.delete_session(session_id)
     return {"status": "success"}
 
 
-@app.post("/ask")
+@app.post("/api/ask")
 async def ask_question(req: AskRequest):
     """
     RAG Endpoint: 
@@ -195,17 +195,12 @@ async def ask_question(req: AskRequest):
             raise HTTPException(status_code=500, detail="Failed to embed query using model_api")
 
         # 2. Search Vector DB for context
-        logger.info(f"Querying ChromaDB collection '{req.document_id}'...")
-        client = chromadb.HttpClient(host=CHROMADB_HOST, port=CHROMADB_PORT)
-        try:
-            collection = client.get_collection(name=req.document_id)
-        except Exception as e:
-            raise HTTPException(status_code=404, detail=f"Document ID '{req.document_id}' not found in database. Did you upload it?")
-
-        results = collection.query(
-            query_embeddings=query_embedding,
-            n_results=MAX_CONTEXT_CHUNKS  # Get top N relevant chunks for more prompt context
-        )
+        if req.notebook_id:
+            logger.info(f"Hybrid querying PostgreSQL PgVector for Notebook '{req.notebook_id}'...")
+            results = await db.hybrid_search_notebook(req.notebook_id, req.query, query_embedding[0], limit=MAX_CONTEXT_CHUNKS)
+        else:
+            logger.info(f"Querying PostgreSQL PgVector for Document '{req.document_id}'...")
+            results = await db.search_document_chunks(req.document_id, query_embedding[0], limit=MAX_CONTEXT_CHUNKS)
         
         # 3. Compile Context
         if not results['documents'] or not results['documents'][0]:
@@ -319,45 +314,8 @@ async def ask_question(req: AskRequest):
             except Exception as _e:
                 logger.warning(f"Sentence-level highlight extraction failed: {_e}")
 
-        # 4c. Query image collection for relevant figures (based on same query embedding)
+        # 4c. Query image collection skipped for pure PostgreSQL setup (Deferred)
         relevant_images = []
-        try:
-            img_collection = client.get_collection(name=f"{req.document_id}_images")
-            img_results = img_collection.query(
-                query_embeddings=query_embedding,
-                n_results=2,
-                include=["metadatas", "distances"],
-            )
-
-            candidates = []
-            for meta, distance in zip(
-                img_results.get("metadatas", [[]])[0],
-                img_results.get("distances", [[]])[0],
-            ):
-                if not meta or not meta.get("filename"):
-                    continue
-                candidates.append((distance, meta))
-                # Only include images that are semantically close (distance threshold)
-                if distance < IMAGE_DISTANCE_THRESHOLD:
-                    relevant_images.append({
-                        "filename": meta["filename"],
-                        "page": meta.get("page", 1),
-                        "caption": meta.get("caption", ""),
-                        "ai_description": meta.get("ai_description", ""),
-                    })
-
-            # If no image passed the threshold, still return the closest one to validate UI
-            if not relevant_images and candidates:
-                best_distance, best_meta = min(candidates, key=lambda x: x[0])
-                relevant_images.append({
-                    "filename": best_meta["filename"],
-                    "page": best_meta.get("page", 1),
-                    "caption": best_meta.get("caption", ""),
-                    "ai_description": best_meta.get("ai_description", ""),
-                    "distance": best_distance,
-                })
-        except Exception:
-            pass  # No image collection yet — skip silently
 
         return {
             "answer": answer,
@@ -373,7 +331,7 @@ async def ask_question(req: AskRequest):
         logger.error(f"Error during Q&A: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/images/{document_id}/{filename}")
+@app.get("/api/images/{document_id}/{filename}")
 def serve_image(document_id: str, filename: str):
     """
     Serves an extracted figure image file so the frontend can display it.
@@ -394,7 +352,7 @@ def serve_image(document_id: str, filename: str):
     raise HTTPException(status_code=404, detail=f"Image '{filename}' not found for document '{document_id}'.")
 
 
-@app.get("/pdf/{document_id}")
+@app.get("/api/pdf/{document_id}")
 async def serve_pdf(document_id: str):
     """
     Serves the raw PDF file so the frontend PDF viewer can render it.
@@ -423,9 +381,18 @@ async def serve_pdf(document_id: str):
         filename=doc_meta["filename"],
     )
 
-@app.get("/health")
+@app.get("/api/health")
 def health_check():
     return {"status": "ready"}
+
+@app.get("/api/search")
+async def keyword_search(notebook_id: str, q: str, limit: int = 10):
+    """Explicit endpoint for Full-Text keyword queries across a Notebook constraint."""
+    if not q or not notebook_id:
+        raise HTTPException(status_code=400, detail="Missing query or notebook_id")
+    logger.info(f"Executing GIN exact search on notebook '{notebook_id}' for query '{q}'")
+    results = await db.exact_keyword_search(notebook_id, q, limit=limit)
+    return results
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8080, reload=True)

@@ -2,15 +2,13 @@ import os
 import json
 import logging
 import requests
-import chromadb
+import asyncio
+import db
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-CHROMADB_HOST = os.environ.get('CHROMADB_HOST', 'chromadb')
-CHROMADB_PORT = os.environ.get('CHROMADB_PORT', '8000')
 MODEL_API_URL = os.environ.get('MODEL_API_URL', 'http://model_api:8000')
-
 
 # ── Block-level loading (preferred — has bbox coords) ──────────────────────────
 
@@ -146,23 +144,21 @@ def get_embeddings_from_api(chunks):
         return None
 
 
-def store_in_chroma(chunks, embeddings, collection_name, metadatas):
-    """Stores chunks and embeddings in ChromaDB. Recreates collection on re-upload."""
-    logger.info(f"Connecting to ChromaDB at {CHROMADB_HOST}:{CHROMADB_PORT}...")
+def store_in_pgvector(chunks, embeddings, collection_name, metadatas, notebook_id=None):
+    """Stores chunks and embeddings in PostgreSQL pgvector."""
+    logger.info(f"Connecting to PostgreSQL to save {len(chunks)} chunks for '{collection_name}'...")
     try:
-        client = chromadb.HttpClient(host=CHROMADB_HOST, port=CHROMADB_PORT)
         try:
-            client.delete_collection(name=collection_name)
-        except Exception:
-            pass
-        collection = client.get_or_create_collection(name=collection_name)
-        ids = [f"chunk_{i}" for i in range(len(chunks))]
-        logger.info(f"Adding {len(chunks)} documents to collection '{collection_name}'...")
-        collection.add(embeddings=embeddings, documents=chunks, metadatas=metadatas, ids=ids)
-        logger.info("Successfully stored chunks in ChromaDB.")
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+        loop.run_until_complete(db.save_document_chunks(collection_name, chunks, embeddings, metadatas, notebook_id=notebook_id))
+        logger.info("Successfully stored chunks in PostgreSQL.")
         return True
     except Exception as e:
-        logger.error(f"Error interacting with ChromaDB: {e}", exc_info=True)
+        logger.error(f"Error interacting with PostgreSQL: {e}", exc_info=True)
         return False
 
 
@@ -280,33 +276,20 @@ async def embed_image_captions(document_id):
         for entry in image_index
     ]
 
-    img_collection_name = f"{document_id}_images"
-    logger.info(f"Storing {len(image_index)} enriched image embeddings in '{img_collection_name}'...")
+    # TODO: Migrate Image similarity search to PostgreSQL pgvector in future iteration.
+    # For now, we only update the MongoDB descriptions to satisfy the UI.
+    logger.info(f"Enriched image index updated in database. Vector indexing for images is deferred.")
 
-    try:
-        client = chromadb.HttpClient(host=CHROMADB_HOST, port=CHROMADB_PORT)
-        try:
-            client.delete_collection(name=img_collection_name)
-        except Exception:
-            pass
-        collection = client.get_or_create_collection(name=img_collection_name)
-        ids = [f"img_{i}" for i in range(len(image_index))]
-        collection.add(embeddings=embeddings, documents=enriched_texts, metadatas=metadatas, ids=ids)
-        logger.info(f"Enriched image index stored in ChromaDB.")
+    # Save the updated index back to MongoDB with ai_descriptions
+    await db.save_image_index(document_id, image_index)
+    logger.info(f"Updated image index with AI descriptions saved to database for {document_id}")
 
-        # Save the updated index back to MongoDB with ai_descriptions
-        await db.save_image_index(document_id, image_index)
-        logger.info(f"Updated image index with AI descriptions saved to MongoDB for {document_id}")
-
-        return True
-    except Exception as e:
-        logger.error(f"Error storing image embeddings in ChromaDB: {e}", exc_info=True)
-        return False
+    return True
 
 
-def process_and_embed(json_path, collection_name, blocks_json_path=None):
+def process_and_embed(json_path, collection_name, blocks_json_path=None, notebook_id=None):
     """
-    Master pipeline: load blocks → sentence-chunk with bbox → embed → store in ChromaDB.
+    Master pipeline: load blocks → sentence-chunk with bbox → embed → store in pgvector.
     blocks_json_path must point to the _blocks.json saved by extract_text_blocks().
     """
     logger.info(f"Starting embedding pipeline for: {json_path}")
@@ -352,7 +335,7 @@ def process_and_embed(json_path, collection_name, blocks_json_path=None):
         logger.error("Failed to get embeddings.")
         return False
 
-    # Build metadata — bbox fields stored as flat numbers (ChromaDB requires scalar values)
+    # Build metadata — bbox fields stored as flat numbers
     metadatas = []
     for i, c in enumerate(tagged_chunks):
         bbox = c.get("bbox") or [0, 0, 0, 0]
@@ -368,8 +351,7 @@ def process_and_embed(json_path, collection_name, blocks_json_path=None):
             "page_height": c.get("page_height", 0),
         })
 
-    return store_in_chroma(texts, embeddings, collection_name, metadatas)
-
+    return store_in_pgvector(texts, embeddings, collection_name, metadatas, notebook_id=notebook_id)
 
 if __name__ == "__main__":
     import glob

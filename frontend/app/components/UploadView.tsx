@@ -4,9 +4,10 @@ import apiClient from '../api/client';
 
 interface UploadViewProps {
   onUploadComplete: (documentId: string, fileName: string) => void;
+  notebookId?: string;
 }
 
-export function UploadView({ onUploadComplete }: UploadViewProps) {
+export function UploadView({ onUploadComplete, notebookId }: UploadViewProps) {
   const [isDragging, setIsDragging] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -34,6 +35,9 @@ export function UploadView({ onUploadComplete }: UploadViewProps) {
 
     const formData = new FormData();
     formData.append('file', file);
+    if (notebookId) {
+      formData.append('notebook_id', notebookId);
+    }
 
     try {
       const { data } = await apiClient.post('/api/upload-pdf', formData, {
