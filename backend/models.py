@@ -7,10 +7,20 @@ import datetime
 
 Base = declarative_base()
 
+class User(Base):
+    __tablename__ = 'users'
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    email = Column(String(255), unique=True, index=True, nullable=False)
+    hashed_password = Column(String(255), nullable=False)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+    notebooks = relationship("Notebook", back_populates="user")
+    sources = relationship("Source", back_populates="user")
+
 class Notebook(Base):
     __tablename__ = 'notebooks'
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    owner_id = Column(String(36), nullable=True)
+    user_id = Column(String(36), ForeignKey('users.id'), nullable=True)
     title = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
     color = Column(String(20), nullable=True)
@@ -20,10 +30,12 @@ class Notebook(Base):
 
     sources = relationship("Source", back_populates="notebook")
     sessions = relationship("Session", back_populates="notebook")
+    user = relationship("User", back_populates="notebooks")
 
 class Source(Base):
     __tablename__ = 'sources'
-    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    id = Column(String(255), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String(36), ForeignKey('users.id'), nullable=True)
     notebook_id = Column(String(36), ForeignKey('notebooks.id'), nullable=True)
     title = Column(String(255), nullable=False)
     source_type = Column(String(50), default='pdf')
@@ -38,6 +50,7 @@ class Source(Base):
     is_deleted = Column(Boolean, default=False)
 
     notebook = relationship("Notebook", back_populates="sources")
+    user = relationship("User", back_populates="sources")
     chunks = relationship("DocumentChunk", back_populates="source", cascade="all, delete-orphan")
 
 class DocumentChunk(Base):
@@ -48,7 +61,7 @@ class DocumentChunk(Base):
     )
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    source_id = Column(String(36), ForeignKey('sources.id', ondelete='CASCADE'))
+    source_id = Column(String(255), ForeignKey('sources.id', ondelete='CASCADE'))
     notebook_id = Column(String(36), ForeignKey('notebooks.id'))
     text = Column(Text, nullable=False)
     page_number = Column(Integer, nullable=True)
@@ -64,7 +77,7 @@ class Embedding(Base):
     __tablename__ = 'embeddings'
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     chunk_id = Column(String(36), ForeignKey('document_chunks.id', ondelete='CASCADE'), unique=True)
-    source_id = Column(String(36), ForeignKey('sources.id'), nullable=True)
+    source_id = Column(String(255), ForeignKey('sources.id'), nullable=True)
     embedding = Column(Vector(768)) # Specter2 uses 768 dims
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
@@ -72,7 +85,7 @@ class Embedding(Base):
 
 class Session(Base):
     __tablename__ = 'sessions'
-    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    id = Column(String(255), primary_key=True, default=lambda: str(uuid.uuid4()))
     notebook_id = Column(String(36), ForeignKey('notebooks.id'), nullable=True)
     document_id = Column(String(255), nullable=True) # For backward compatibility with single-doc MVP
     document_name = Column(String(255), nullable=True)
@@ -86,7 +99,7 @@ class Session(Base):
 class Message(Base):
     __tablename__ = 'messages'
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    session_id = Column(String(36), ForeignKey('sessions.id', ondelete='CASCADE'))
+    session_id = Column(String(255), ForeignKey('sessions.id', ondelete='CASCADE'))
     type = Column(String(50)) # 'user' or 'assistant'
     content = Column(Text)
     sources_cited = Column(JSONB, nullable=True)

@@ -3,6 +3,11 @@ import { Workspace } from './components/Workspace';
 import { NotebookDashboard } from './components/NotebookDashboard';
 import apiClient from './api/client';
 
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router';
+import { AuthProvider } from './context/AuthContext';
+import { ProtectedRoute } from './components/ProtectedRoute';
+import { AuthPage } from './pages/AuthPage';
+
 export interface Message {
   id: string;
   type: 'user' | 'assistant';
@@ -20,7 +25,7 @@ interface Session {
   messages: Message[];
 }
 
-export default function App() {
+function MainApp() {
   const STORAGE_KEY = 'rps-sessions-v2';
 
   const [sessions, setSessions] = useState<Session[]>(() => {
@@ -38,19 +43,16 @@ export default function App() {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(sessions));
   }, [sessions]);
 
-  // When a notebook is selected, create/reuse a session for it  
   const handleSelectNotebook = async (notebookId: string) => {
     setCurrentNotebookId(notebookId);
 
-    // Try fetching the notebook title
     try {
       const { data } = await apiClient.get(`/api/notebooks/${notebookId}`);
-      setCurrentNotebookTitle(data.notebook?.title || 'Research Notebook');
+      setCurrentNotebookTitle(data.notebook?.title || 'Research Canvas');
     } catch {
-      setCurrentNotebookTitle('Research Notebook');
+      setCurrentNotebookTitle('Research Canvas');
     }
 
-    // Reuse existing session for this notebook or create new
     const existing = sessions.find(s => s.documentId === `notebook:${notebookId}`);
     if (existing) {
       setCurrentSessionId(existing.id);
@@ -58,7 +60,7 @@ export default function App() {
       const newSession: Session = {
         id: `session_${notebookId}_${Date.now()}`,
         documentId: `notebook:${notebookId}`,
-        documentName: 'Notebook Session',
+        documentName: 'Canvas Session',
         timestamp: Date.now(),
         messageCount: 0,
         messages: [],
@@ -66,12 +68,7 @@ export default function App() {
       setSessions(prev => [newSession, ...prev]);
       setCurrentSessionId(newSession.id);
 
-      // Register on backend
-      fetch('/api/sessions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newSession),
-      }).catch(() => {});
+      apiClient.post('/api/sessions', newSession).catch(() => {});
     }
   };
 
@@ -124,5 +121,21 @@ export default function App() {
 
   return (
     <NotebookDashboard onSelectNotebook={handleSelectNotebook} />
+  );
+}
+
+export default function App() {
+  return (
+    <AuthProvider>
+      <BrowserRouter>
+        <Routes>
+          <Route path="/login" element={<AuthPage />} />
+          <Route element={<ProtectedRoute />}>
+            <Route path="/canvas" element={<MainApp />} />
+          </Route>
+          <Route path="*" element={<Navigate to="/canvas" replace />} />
+        </Routes>
+      </BrowserRouter>
+    </AuthProvider>
   );
 }

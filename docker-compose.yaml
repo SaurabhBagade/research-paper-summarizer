@@ -7,13 +7,17 @@ services:
       POSTGRES_USER: research_user
       POSTGRES_PASSWORD: secure_password
       POSTGRES_DB: research_db
+      TZ: Asia/Kolkata
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    # Tune postgres to stay lean — enough for a small research DB with pgvector
+    command: >
+      postgres -c shared_buffers=128MB -c work_mem=8MB -c maintenance_work_mem=64MB -c max_connections=20
     restart: always
     deploy:
       resources:
         limits:
-          memory: 2G
+          memory: 512M
     networks:
       - app_network
 
@@ -41,25 +45,24 @@ services:
       - ./model_api/cache:/root/.cache
     environment:
       - HF_TOKEN=${HF_TOKEN}
-      - OLLAMA_URL=http://ollama:11434
-      - TEXT_MODEL=mistral
-      - VISION_MODEL=moondream
+      # Point to the Ollama instance running natively on the Windows host.
+      # extra_hosts below injects host.docker.internal → host-gateway for WSL2
+      - OLLAMA_URL=${OLLAMA_URL:-http://host.docker.internal:11434}
+      - TEXT_MODEL=${TEXT_MODEL:-gemma4:e2b}
+      - VISION_MODEL=${VISION_MODEL:-gemma4:e2b}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     deploy:
       resources:
         limits:
-          memory: 4G
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [ gpu ]
+          memory: 1G # Specter2 weights ~440MB + PyTorch runtime ~300MB
     restart: always
     healthcheck:
-      test: [ "CMD", "curl", "--fail", "http://localhost:8000/health" ]
+      test: [ "CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\"" ]
       interval: 30s
       timeout: 10s
       retries: 5
-      start_period: 60s
+      start_period: 120s # Specter2 may download ~440MB weights on first boot
     networks:
       - app_network
 
@@ -82,7 +85,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1G
+          memory: 512M # FastAPI serving + light PyMuPDF ops
     depends_on:
       - postgres
       - model_api
@@ -106,7 +109,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 2G
+          memory: 768M # PyMuPDF + pdfplumber peak during PDF ingestion
     depends_on:
       - postgres
       - redis
@@ -129,32 +132,9 @@ services:
     deploy:
       resources:
         limits:
-          memory: 0.5G
+          memory: 256M # Vite dev server idles at ~100-150MB
     depends_on:
       - backend
-    networks:
-      - app_network
-
-  ollama:
-    image: ollama/ollama:latest
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama_data:/root/.ollama
-    environment:
-      - OLLAMA_MAX_LOADED_MODELS=1
-      - OLLAMA_GPU_OVERHEAD=1000000000
-      - OLLAMA_CONTEXT_LENGTH=4k
-    deploy:
-      resources:
-        limits:
-          memory: 3G
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [ gpu ]
-    restart: always
     networks:
       - app_network
 
@@ -164,6 +144,5 @@ networks:
 
 volumes:
   postgres_data:
-  ollama_data:
 
 

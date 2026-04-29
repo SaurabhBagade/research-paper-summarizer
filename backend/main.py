@@ -2,7 +2,8 @@ import os
 import shutil
 import logging
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
-from fastapi import FastAPI, UploadFile, File, HTTPException, Form
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Depends, status
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 import uvicorn
@@ -10,8 +11,9 @@ import re
 import requests
 import db
 import init_db
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr
 from worker import process_pdf_task, celery_app
+import auth
 from embedding_utils import get_embeddings_from_api, MODEL_API_URL
 
 # Configure Logging
@@ -56,17 +58,64 @@ MAX_GENERATE_TOKENS = int(os.environ.get('MAX_GENERATE_TOKENS', '512'))
 # How permissive to be when returning related images (higher returns more images)
 IMAGE_DISTANCE_THRESHOLD = float(os.environ.get('IMAGE_DISTANCE_THRESHOLD', '1.8'))
 
+# Auth Setup
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
+
+async def get_current_user(token: str = Depends(oauth2_scheme)):
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = auth.jwt.decode(token, auth.SECRET_KEY, algorithms=[auth.ALGORITHM])
+        email: str = payload.get("sub")
+        if email is None:
+            raise credentials_exception
+    except auth.JWTError:
+        raise credentials_exception
+    user = await db.get_user_by_email(email)
+    if user is None:
+        raise credentials_exception
+    return user
+
+class UserCreate(BaseModel):
+    email: EmailStr
+    password: str
+
+@app.post("/api/auth/register")
+async def register(user: UserCreate):
+    existing_user = await db.get_user_by_email(user.email)
+    if existing_user:
+        raise HTTPException(status_code=400, detail="Email already registered")
+    hashed_password = auth.get_password_hash(user.password)
+    new_user = await db.create_user(user.email, hashed_password)
+    return {"message": "User registered successfully"}
+
+@app.post("/api/auth/login")
+async def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    user = await db.get_user_by_email(form_data.username) # OAuth2 uses 'username' field
+    if not user or not auth.verify_password(form_data.password, user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    access_token = auth.create_access_token(data={"sub": user.email})
+    return {"access_token": access_token, "token_type": "bearer"}
+
+
 @app.post("/api/notebooks")
-async def create_notebook(req: dict):
+async def create_notebook(req: dict, current_user = Depends(get_current_user)):
     title = req.get("title", "New Notebook")
     description = req.get("description", "")
     color = req.get("color", "#3B82F6")
-    nb = await db.create_notebook(title, description, color)
+    nb = await db.create_notebook(title, description, color, current_user.id)
     return {"status": "success", "notebook": nb}
 
 @app.get("/api/notebooks")
-async def get_notebooks():
-    nbs = await db.get_notebooks()
+async def get_notebooks(current_user = Depends(get_current_user)):
+    nbs = await db.get_notebooks(current_user.id)
     return {"notebooks": nbs}
 
 @app.get("/api/notebooks/{notebook_id}")
@@ -77,9 +126,25 @@ async def get_notebook(notebook_id: str):
     return {"notebook": nb}
 
 @app.get("/api/notebooks/{notebook_id}/sources")
-async def get_notebook_sources(notebook_id: str):
+async def get_notebook_sources(notebook_id: str, current_user = Depends(get_current_user)):
     sources = await db.get_sources(notebook_id)
     return {"sources": sources}
+
+@app.delete("/api/notebooks/{notebook_id}")
+async def delete_notebook_endpoint(notebook_id: str, current_user = Depends(get_current_user)):
+    file_paths = await db.delete_notebook(notebook_id)
+    # Cleanup files
+    for path in file_paths:
+        LocalStorageManager.delete_file(path)
+    return {"status": "success", "message": f"Notebook {notebook_id} and sources deleted."}
+
+@app.delete("/api/sources/{source_id}")
+async def delete_source_endpoint(source_id: str, current_user = Depends(get_current_user)):
+    file_path = await db.delete_source(source_id)
+    if file_path:
+        LocalStorageManager.delete_file(file_path)
+        return {"status": "success", "message": f"Source {source_id} deleted."}
+    raise HTTPException(status_code=404, detail="Source not found")
 
 def sanitize_document_id(name: str) -> str:
     """
@@ -89,8 +154,10 @@ def sanitize_document_id(name: str) -> str:
     sanitized = re.sub(r'[^0-9A-Za-z]+', '_', name).strip('_')
     return sanitized or 'document'
 
+from storage import LocalStorageManager
+
 @app.post("/api/upload-pdf")
-async def upload_pdf(file: UploadFile = File(...), notebook_id: str = Form(None)):
+async def upload_pdf(file: UploadFile = File(...), notebook_id: str = Form(None), current_user = Depends(get_current_user)):
     """
     Endpoint to receive a PDF, save it, and trigger the extraction & embedding pipeline.
     Optionally tie it to a notebook.
@@ -98,23 +165,38 @@ async def upload_pdf(file: UploadFile = File(...), notebook_id: str = Form(None)
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="File must be a PDF")
 
-    # 1. Save the file locally
-    file_path = os.path.join(DATA_DIR, file.filename)
+    # 1. Save the file locally using storage abstraction
     logger.info(f"Receiving upload: {file.filename}")
     try:
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-        logger.info(f"Successfully saved file to {file_path}")
+        file_path = await LocalStorageManager.save_pdf(file, file.filename, current_user.id, notebook_id)
     except Exception as e:
-        logger.error(f"Failed to save file {file.filename}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to save file: {e}")
 
-    # 2. Extract Data via Celery worker
+    # 2. Check if already uploaded and deduplicate
     base_name = os.path.splitext(file.filename)[0]
     safe_col_name = sanitize_document_id(base_name)
+    if notebook_id:
+        safe_col_name = f"nb_{notebook_id}_{safe_col_name}"
 
-    # Save mapping of sanitized ID to original filename immediately so frontend knows it exists
-    await db.save_document_metadata(safe_col_name, file.filename)
+    existing_source = await db.get_source(safe_col_name)
+    if existing_source:
+        logger.info(f"Source {safe_col_name} already exists. Skipping extraction.")
+        return {
+            "status": "success", 
+            "message": f"{file.filename} is already processed.",
+            "document_id": safe_col_name,
+            "notebook_id": notebook_id,
+            "task_id": None
+        }
+
+    # Save source record to DB linked to user and notebook
+    await db.create_source(
+        document_id=safe_col_name,
+        title=file.filename,
+        file_path=file_path,
+        notebook_id=notebook_id,
+        user_id=current_user.id
+    )
     logger.info(f"Dispatching Celery task for document ID: {safe_col_name} to Notebook: {notebook_id}")
 
     task = process_pdf_task.delay(safe_col_name, file.filename, notebook_id)
@@ -356,10 +438,10 @@ def serve_image(document_id: str, filename: str):
 async def serve_pdf(document_id: str):
     """
     Serves the raw PDF file so the frontend PDF viewer can render it.
-    Uses database metadata to find the original filename.
+    Uses database metadata to find the original file path.
     """
-    doc_meta = await db.get_document_metadata(document_id)
-    if not doc_meta or not doc_meta.get("filename"):
+    source = await db.get_source(document_id)
+    if not source or not source.file_path:
         # Fallback to scanning for older documents
         for filename in os.listdir(DATA_DIR):
             if filename.lower().endswith(".pdf"):
@@ -367,18 +449,18 @@ async def serve_pdf(document_id: str):
                     return FileResponse(
                         path=os.path.join(DATA_DIR, filename),
                         media_type="application/pdf",
-                        filename=filename,
+                        headers={"Content-Disposition": f"inline; filename=\"{filename}\""}
                     )
         raise HTTPException(status_code=404, detail=f"PDF for document '{document_id}' not found.")
 
-    file_path = os.path.join(DATA_DIR, doc_meta["filename"])
+    file_path = source.file_path
     if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail=f"PDF file '{doc_meta['filename']}' not found on disk.")
+        raise HTTPException(status_code=404, detail=f"PDF file not found on disk.")
 
     return FileResponse(
         path=file_path,
         media_type="application/pdf",
-        filename=doc_meta["filename"],
+        headers={"Content-Disposition": f"inline; filename=\"{source.title}\""}
     )
 
 @app.get("/api/health")
@@ -393,6 +475,66 @@ async def keyword_search(notebook_id: str, q: str, limit: int = 10):
     logger.info(f"Executing GIN exact search on notebook '{notebook_id}' for query '{q}'")
     results = await db.exact_keyword_search(notebook_id, q, limit=limit)
     return results
+
+from celery.result import AsyncResult
+from worker import generate_audio_summary_task, generate_mindmap_task
+
+@app.get("/api/tasks/{task_id}")
+async def get_task_status(task_id: str):
+    task = AsyncResult(task_id, app=celery_app)
+    state = task.state  # PENDING, STARTED, SUCCESS, FAILURE, RETRY
+
+    if state == 'PENDING':
+        return {"task_id": task_id, "task_status": "PENDING", "task_result": None}
+    elif state == 'SUCCESS':
+        result = task.result  # the dict returned by the Celery task
+        # Detect inner FAILURE (task succeeded on Celery level but returned an error payload)
+        inner_status = result.get("status") if isinstance(result, dict) else None
+        if inner_status == "FAILURE":
+            return {"task_id": task_id, "task_status": "FAILURE", "task_result": result}
+        return {"task_id": task_id, "task_status": "SUCCESS", "task_result": result}
+    elif state == 'FAILURE':
+        return {"task_id": task_id, "task_status": "FAILURE", "task_result": {"error": str(task.info)}}
+    else:
+        # STARTED, RETRY, custom states
+        return {"task_id": task_id, "task_status": "PROCESSING", "task_result": None}
+
+class MindmapRequest(BaseModel):
+    focus_topic: str
+
+@app.post("/api/notebooks/{notebook_id}/audio-summary")
+async def request_audio_summary(notebook_id: str, current_user = Depends(get_current_user)):
+    task = generate_audio_summary_task.delay(notebook_id, current_user.id)
+    return {"status": "success", "task_id": task.id}
+
+@app.get("/api/notebooks/{notebook_id}/audio")
+async def serve_audio_summary(notebook_id: str, token: str = None):
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing token")
+    try:
+        payload = auth.jwt.decode(token, auth.SECRET_KEY, algorithms=[auth.ALGORITHM])
+        email: str = payload.get("sub")
+        user = await db.get_user_by_email(email)
+        if not user:
+            raise Exception()
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    audio_path = os.path.join(DATA_DIR, user.id, notebook_id, "audio", "summary.mp3")
+    if not os.path.exists(audio_path):
+        raise HTTPException(status_code=404, detail="Audio summary not found or not generated yet.")
+    return FileResponse(path=audio_path, media_type="audio/mpeg")
+
+@app.post("/api/notebooks/{notebook_id}/mindmap")
+async def request_mindmap(notebook_id: str, req: MindmapRequest, current_user = Depends(get_current_user)):
+    task = generate_mindmap_task.delay(notebook_id, req.focus_topic)
+    return {"status": "success", "task_id": task.id}
+
+@app.post("/api/notebooks/{notebook_id}/mindmap/expand")
+async def request_mindmap_expand(notebook_id: str, req: MindmapRequest, current_user = Depends(get_current_user)):
+    # Reuses the mindmap generation task but targeted
+    task = generate_mindmap_task.delay(notebook_id, req.focus_topic)
+    return {"status": "success", "task_id": task.id}
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8080, reload=True)

@@ -1,9 +1,10 @@
 import { useState, useEffect, useRef } from 'react';
 import {
   Search, Grid3x3, List, Settings, User, Plus, BookOpen,
-  MoreVertical, Clock, Loader2, X, ChevronRight
+  MoreVertical, Clock, Loader2, X, ChevronRight, LogOut
 } from 'lucide-react';
 import apiClient from '../api/client';
+import { useAuth } from '../context/AuthContext';
 
 export interface Notebook {
   id: string;
@@ -28,6 +29,7 @@ const GRADIENTS = [
 const EMOJIS = ['📊', '🧠', '🌐', '💾', '🔬', '📈', '🧬', '⚡', '🎯', '📚'];
 
 export function NotebookDashboard({ onSelectNotebook }: NotebookDashboardProps) {
+  const { logout } = useAuth();
   const [notebooks, setNotebooks] = useState<Notebook[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isCreating, setIsCreating] = useState(false);
@@ -118,8 +120,12 @@ export function NotebookDashboard({ onSelectNotebook }: NotebookDashboardProps) 
             <button className="p-2 text-[#9CA3AF] hover:text-[#F3F4F6] hover:bg-[#374151] rounded-md transition-colors">
               <Settings className="h-5 w-5" />
             </button>
-            <button className="p-2 text-[#9CA3AF] hover:text-[#F3F4F6] hover:bg-[#374151] rounded-md transition-colors">
-              <User className="h-5 w-5" />
+            <button 
+              onClick={logout}
+              className="p-2 text-[#9CA3AF] hover:text-red-400 hover:bg-[#374151] rounded-md transition-colors"
+              title="Log Out"
+            >
+              <LogOut className="h-5 w-5" />
             </button>
             <button className="bg-[#3B82F6] hover:bg-[#2563EB] text-white text-sm font-semibold px-4 py-1.5 rounded-md transition-colors">
               PRO

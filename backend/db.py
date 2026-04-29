@@ -3,12 +3,12 @@ import logging
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy import select, delete, func
 from sqlalchemy.orm import selectinload
-from models import Session as DBSession, Message, ImageIndex, DocumentChunk, Embedding, Source, Notebook
+from models import Session as DBSession, Message, ImageIndex, DocumentChunk, Embedding, Source, Notebook, User
 
 logger = logging.getLogger(__name__)
 
 # Use asyncpg for async PostgreSQL connection
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://research_user:secure_password@postgres:5432/research_db")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://research_user:secure_password@research_user:5432/research_db")
 
 # Replace psycopg2 with asyncpg if the URL specifies psycopg2 (which is sync)
 if DATABASE_URL.startswith("postgresql+psycopg2://"):
@@ -114,6 +114,19 @@ async def get_image_index(document_id: str):
         idx = result.scalar_one_or_none()
         return idx.images if idx else []
 
+async def get_user_by_email(email: str):
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(User).filter_by(email=email))
+        return result.scalar_one_or_none()
+
+async def create_user(email: str, hashed_password: str):
+    async with AsyncSessionLocal() as session:
+        user = User(email=email, hashed_password=hashed_password)
+        session.add(user)
+        await session.commit()
+        return user
+
+
 async def save_document_metadata(document_id: str, filename: str):
     """
     Saves a mapping from a sanitized document_id to its original filename.
@@ -144,9 +157,9 @@ async def get_document_metadata(document_id: str):
 
 # --- Notebook & Source Management ---
 
-async def create_notebook(title: str, description: str = None, color: str = None):
+async def create_notebook(title: str, description: str = None, color: str = None, user_id: str = None):
     async with AsyncSessionLocal() as session:
-        notebook = Notebook(title=title, description=description, color=color)
+        notebook = Notebook(title=title, description=description, color=color, user_id=user_id)
         session.add(notebook)
         await session.commit()
         return {
@@ -157,9 +170,9 @@ async def create_notebook(title: str, description: str = None, color: str = None
             "created_at": notebook.created_at
         }
 
-async def get_notebooks():
+async def get_notebooks(user_id: str):
     async with AsyncSessionLocal() as session:
-        result = await session.execute(select(Notebook).order_by(Notebook.created_at.desc()))
+        result = await session.execute(select(Notebook).filter_by(user_id=user_id).order_by(Notebook.created_at.desc()))
         notebooks = result.scalars().all()
         return [
             {
@@ -185,14 +198,67 @@ async def get_notebook(notebook_id: str):
             "title": nb.title,
             "description": nb.description,
             "color": nb.color,
-            "sources": [{"id": s.id, "title": s.title, "file_path": s.file_path} for s in nb.sources]
         }
+
+async def create_source(document_id: str, title: str, file_path: str, notebook_id: str, user_id: str):
+    async with AsyncSessionLocal() as session:
+        source = Source(
+            id=document_id,
+            title=title,
+            file_path=file_path,
+            notebook_id=notebook_id,
+            user_id=user_id
+        )
+        session.add(source)
+        await session.commit()
+        await session.refresh(source)
+        return source
 
 async def get_sources(notebook_id: str):
     async with AsyncSessionLocal() as session:
         result = await session.execute(select(Source).filter_by(notebook_id=notebook_id))
         sources = result.scalars().all()
         return [{"id": s.id, "title": s.title, "file_path": s.file_path} for s in sources]
+
+async def get_source(source_id: str):
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(Source).filter_by(id=source_id))
+        return result.scalar_one_or_none()
+
+async def delete_source(source_id: str) -> str | None:
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(Source).filter_by(id=source_id))
+        source = result.scalar_one_or_none()
+        if source:
+            file_path = source.file_path
+            await session.delete(source)
+            await session.commit()
+            return file_path
+        return None
+
+async def delete_notebook(notebook_id: str) -> list[str]:
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(Notebook).filter_by(id=notebook_id))
+        nb = result.scalar_one_or_none()
+        if nb:
+            source_res = await session.execute(select(Source).filter_by(notebook_id=notebook_id))
+            sources = source_res.scalars().all()
+            file_paths = [s.file_path for s in sources]
+            
+            for s in sources:
+                await session.delete(s)
+            await session.delete(nb)
+            await session.commit()
+            return file_paths
+        return []
+
+async def get_notebook_texts(notebook_id: str, limit: int = 50) -> list[str]:
+    """Retrieve up to 'limit' text chunks from a notebook to feed into LLM prompts."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(DocumentChunk.text).filter_by(notebook_id=notebook_id).limit(limit)
+        )
+        return result.scalars().all()
 
 async def save_document_chunks(document_id: str, chunks: list, embeddings: list, metadatas: list, notebook_id: str = None):
     """

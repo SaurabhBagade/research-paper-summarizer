@@ -16,9 +16,15 @@ interface SourceLibraryProps {
   notebookId: string;
   onSelectDocument: (documentId: string) => void;
   selectedDocumentId?: string | null;
+  onProcessingChange?: (isProcessing: boolean) => void;
 }
 
-export function SourceLibrary({ notebookId, onSelectDocument, selectedDocumentId }: SourceLibraryProps) {
+export function SourceLibrary({ 
+  notebookId, 
+  onSelectDocument, 
+  selectedDocumentId,
+  onProcessingChange
+}: SourceLibraryProps) {
   const [sources, setSources] = useState<Source[]>([]);
   const [selectedSources, setSelectedSources] = useState<Set<string>>(new Set());
   const [isLoading, setIsLoading] = useState(true);
@@ -65,22 +71,34 @@ export function SourceLibrary({ notebookId, onSelectDocument, selectedDocumentId
 
       setUploadProgress('Processing in background...');
 
-      // Poll for source to appear (Celery is async)
+      // Poll for task completion (Celery is async)
       let retries = 0;
       const pollInterval = setInterval(async () => {
         retries++;
         try {
-          const res = await apiClient.get(`/api/notebooks/${notebookId}/sources`);
-          const newSources = res.data.sources || [];
-          if (newSources.length > sources.length || retries > 15) {
+          if (data.task_id) {
+            const taskRes = await apiClient.get(`/api/tasks/${data.task_id}`);
+            if (taskRes.data.status === 'SUCCESS' || taskRes.data.status === 'completed' || taskRes.data.state === 'SUCCESS') {
+              clearInterval(pollInterval);
+              // Fetch final sources list
+              const srcRes = await apiClient.get(`/api/notebooks/${notebookId}/sources`);
+              const newSources = srcRes.data.sources || [];
+              setSources(newSources);
+              setSelectedSources(new Set(newSources.map((s: Source) => s.id)));
+              setIsUploading(false);
+              setUploadProgress(null);
+            } else if (taskRes.data.status === 'FAILURE' || taskRes.data.status === 'error' || taskRes.data.state === 'FAILURE') {
+              clearInterval(pollInterval);
+              setIsUploading(false);
+              setUploadProgress('Extraction failed');
+            } else {
+              setUploadProgress(`Extracting content... (${retries * 2}s)`);
+            }
+          } else {
+            // Fallback
             clearInterval(pollInterval);
-            setSources(newSources);
-            setSelectedSources(new Set(newSources.map((s: Source) => s.id)));
             setIsUploading(false);
             setUploadProgress(null);
-            if (data.document_id) onSelectDocument(data.document_id);
-          } else {
-            setUploadProgress(`Indexing chunks... (${retries * 2}s)`);
           }
         } catch {
           clearInterval(pollInterval);
@@ -94,9 +112,14 @@ export function SourceLibrary({ notebookId, onSelectDocument, selectedDocumentId
       setUploadProgress(null);
     }
 
-    // Reset so same file can be re-uploaded
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
+
+  useEffect(() => {
+    if (onProcessingChange) {
+      onProcessingChange(isUploading);
+    }
+  }, [isUploading, onProcessingChange]);
 
   const toggleSource = (id: string) => {
     setSelectedSources(prev => {

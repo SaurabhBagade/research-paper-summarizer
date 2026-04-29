@@ -31,11 +31,18 @@ apiClient.interceptors.request.use(
 apiClient.interceptors.response.use(
     (response: any) => response,
     (error: unknown) => {
-        if (error instanceof Error) {
+        if (axios.isAxiosError(error)) {
+            if (error.response && error.response.status === 401) {
+                localStorage.removeItem('auth_token');
+                if (window.location.pathname !== '/login') {
+                    window.location.href = '/login';
+                }
+            }
             console.error('API error:', error.message);
         }
         return Promise.reject(error);
     }
 );
+
 
 export default apiClient;

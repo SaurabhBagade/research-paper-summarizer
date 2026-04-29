@@ -1,0 +1,101 @@
+# Research Paper Summarizer - Project Implementation Plan
+
+This document outlines the step-by-step implementation plan for the final stages of the Research Paper Summarizer project, addressing UI/UX improvements, multi-modal features (Audio/Mindmaps), backend enhancements, asynchronous task processing, and authentication.
+
+## Finalized Decisions
+
+1. **Terminology:** The core concept is renamed from "Notebook" to **"Research Canvas"**.
+2. **Text-to-Audio (Podcast Style):** We will use **Edge-TTS**. 
+   - *Memory Note:* Edge-TTS makes web requests to Microsoft's text-to-speech servers. Therefore, its local VRAM requirement is **0 MB**. This is perfect because it will not compete with Gemma4/Mistral for GPU resources.
+3. **Cloud Deployment:** Postponed indefinitely. We are focusing purely on a robust local architecture.
+4. **Information Extraction:** We will use **spaCy for NER (Named Entity Recognition)** to automatically extract key Tags (Authors, Datasets, Metrics, Algorithms) from uploaded papers.
+5. **Asynchronous Processing:** Since Audio and Mindmap generation are slow, long-running processes, we will introduce **Redis + Celery** to the backend architecture to handle these tasks asynchronously without blocking the UI.
+
+---
+
+## Architectural Additions
+
+### Redis & Celery
+- Add a `redis` container to `docker-compose.yaml`.
+- Add a `celery_worker` container running the backend codebase to process background jobs.
+- The UI will poll the backend (or use WebSockets/SSE) to check the status of long-running tasks and update progress bars.
+
+---
+
+## Task Breakdown & Implementation Plan
+
+### Phase 1: Authentication & Data Isolation
+*Grouping: Backend Security & User Management*
+
+1. **Implement JWT Auth in Backend**
+   - Create `/login` and `/register` endpoints.
+   - Generate JWT tokens upon login.
+   - Add a JWT validation middleware to secure all Research Canvas routes.
+2. **Data Isolation**
+   - Update database schema so that every Research Canvas and File is tied to a `user_id`.
+   - Ensure users can only fetch, edit, and chat with their own Canvases.
+3. **Frontend Auth Flow**
+   - Build a sleek Landing Page with Login/Signup forms.
+   - Implement frontend routing guards (redirect to login if no token).
+
+### Phase 2: Backend File Storage, Extraction & DB Models
+*Grouping: Data Ingestion & Storage*
+
+1. **File Storage Setup**
+   - Implement local disk storage abstraction for PDFs and extracted images (mapped via Docker volumes).
+2. **Advanced PDF Extraction & NER**
+   - Improve PDF parsing to extract text into logical units (sentences/paragraphs).
+   - Implement image extraction: crop images from PDFs, save to storage, and link their paths to the corresponding text chunks.
+   - Integrate **spaCy** to extract Authors, Concepts, Datasets, and Metrics as tags during ingestion.
+3. **Multi-Source Linking**
+   - Update the Research Canvas DB model to support a one-to-many relationship with Files.
+
+### Phase 3: Asynchronous Task Processing (Celery + Redis)
+*Grouping: Infrastructure & Background Jobs*
+
+1. **Setup Infrastructure**
+   - Add Redis and Celery worker to `docker-compose.yaml`.
+   - Configure Celery in the FastAPI/Python backend.
+2. **Asynchronous Audio Synthesis (Edge-TTS)**
+   - Create a Celery task for Map-Reduce summarization + Edge-TTS audio generation.
+   - Create endpoint `/api/canvas/{id}/audio-summary` that triggers the task and returns a `task_id`.
+   - Create endpoint `/api/tasks/{task_id}` for the UI to poll progress.
+3. **Asynchronous Mindmap Generation**
+   - Create a Celery task that prompts Gemma4 to output structured JSON representing nodes and edges based on the canvas content.
+   - Create endpoint `/api/canvas/{id}/mindmap` that triggers the task and returns a `task_id`.
+   - Add capability to "expand" a node as a separate async task.
+
+### Phase 4: Frontend "Research Canvas" UI
+*Grouping: UI/UX & Interactivity*
+
+1. **Layout Implementation (3 Sections)**
+   - **Left Section (Sources):** List uploaded PDFs, add "Upload More" button, show NER tags/metadata (Authors, Metrics).
+   - **Middle Section (Chat):** Main conversational interface.
+   - **Right Section (Enhancements):** Audio player, Mindmap viewer, and generation buttons.
+2. **Sleek & Intuitive Design**
+   - Apply a modern, clean dark/light theme (as per Figma designs).
+   - Use tabs/accordions in the right section to prevent clutter.
+3. **Chat Interface Enhancements**
+   - Add markdown rendering with support for inline images.
+   - Implement **Source Citations** (e.g., `[1]`). Clicking a citation should highlight the source in the Left Section.
+   - Add model state animations: "Thinking...", "Evaluating Sources...".
+   - Handle returned image paths in the chat response JSON and render them nicely.
+4. **Interactive Enhancements (Right Section)**
+   - **Audio Player:** Add a sleek audio player component that plays the generated Edge-TTS file. Show progress bars/spinners while the Celery task is running.
+   - **Mindmap:** Integrate React Flow for the mindmap, supporting smooth expand/collapse animations. Show spinners on individual nodes when expanding them via async tasks.
+
+---
+
+## Verification Plan
+
+### Automated Tests
+- Test Celery worker initialization and basic task execution.
+- Unit tests for JWT generation and verification.
+- Test PDF extraction logic with a sample paper containing text and images.
+
+### Manual Verification
+- **Auth Flow:** Register, log in, create a canvas, log out, log in as another user, and verify isolation.
+- **Chat:** Ask a question and verify that citations `[1]` are correct and any relevant extracted images are displayed in the chat.
+- **Async Processing:** Click "Generate Audio" and "Generate Mindmap", verify the UI shows progress, and confirm the backend isn't blocked.
+- **Audio:** Play back the generated Edge-TTS audio in the browser.
+- **Mindmap:** Click a node to expand it, wait for the background task, and verify the smooth animation of new nodes appearing.

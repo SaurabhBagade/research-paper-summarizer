@@ -198,52 +198,36 @@ async def embed_image_captions(document_id):
         return True
 
     enriched_texts = []
-    logger.info(f"Generating vision descriptions for {len(image_index)} images...")
-    
+    logger.info(f"Found {len(image_index)} images — skipping AI description generation (disabled).")
+
     def process_image(entry):
         img_filename = entry["filename"]
         caption = entry.get("caption", "")
-        img_path = os.path.join(img_dir_path, img_filename)
-        
-        description = ""
-        if os.path.exists(img_path):
-            img_b64 = _image_to_base64(img_path)
-            if img_b64:
-                try:
-                    # Request visual description from model_api
-                    v_resp = requests.post(f"{MODEL_API_URL}/vision", json={"image_base64": img_b64}, timeout=120)
-                    if v_resp.status_code == 200:
-                        try:
-                            resp_json = v_resp.json()
-                        except ValueError:
-                            logger.warning(f"Vision API returned non-JSON for {img_filename}: {v_resp.text}")
-                            resp_json = {}
 
-                        # Support both current and potential old response shapes
-                        description = resp_json.get("description") or resp_json.get("response") or ""
-                        if not description:
-                            logger.warning(
-                                f"Vision API returned empty description for {img_filename}; full response: {resp_json}"
-                            )
-                        else:
-                            logger.info(f"Vision description generated for {img_filename} = {description[:50]}...")
-                    else:
-                        logger.warning(f"Vision API failed for {img_filename}: {v_resp.status_code} {v_resp.text}")
-                        description = ""
-                except Exception as e:
-                    logger.warning(f"Vision description failed for {img_filename}: {e}")
-                    description = ""
+        # ----- Vision description generation DISABLED -----
+        # Uncomment the block below to re-enable AI descriptions via model_api
+        # description = ""
+        # img_path = os.path.join(img_dir_path, img_filename)
+        # if os.path.exists(img_path):
+        #     img_b64 = _image_to_base64(img_path)
+        #     if img_b64:
+        #         try:
+        #             v_resp = requests.post(f"{MODEL_API_URL}/vision", json={"image_base64": img_b64}, timeout=120)
+        #             if v_resp.status_code == 200:
+        #                 resp_json = v_resp.json()
+        #                 description = resp_json.get("description") or resp_json.get("response") or ""
+        #             else:
+        #                 logger.warning(f"Vision API failed for {img_filename}: {v_resp.status_code} {v_resp.text}")
+        #         except Exception as e:
+        #             logger.warning(f"Vision description failed for {img_filename}: {e}")
+        # if not description and caption:
+        #     description = caption
+        # ---------------------------------------------------
 
-        if not description and caption:
-            # Fall back to caption if the model did not output anything
-            description = caption
-            logger.debug(f"Falling back to caption text for ai_description of {img_filename}")
-
-        # Combine caption and AI description for the search index
-        combined_text = f"Caption: {caption}\nVisual Description: {description}"
-        # Store for metadata
+        # Use caption as description placeholder for now
+        description = caption
         entry["ai_description"] = description
-        logger.debug(f"Set ai_description for {img_filename}: '{description[:50]}...'")
+        combined_text = f"Caption: {caption}"
         return combined_text
 
     from concurrent.futures import ThreadPoolExecutor
@@ -253,39 +237,60 @@ async def embed_image_captions(document_id):
     if not enriched_texts:
         return True
 
-
-    # Save the updated index (with AI descriptions) to MongoDB even if embedding fails
+    # Save image index with captions (no AI descriptions) to MongoDB
     try:
         await db.save_image_index(document_id, image_index)
-        logger.info(f"Saved image index with AI descriptions to MongoDB for document '{document_id}'")
+        logger.info(f"Saved image index to MongoDB for document '{document_id}'")
     except Exception as e:
         logger.warning(f"Failed to save image index to MongoDB for {document_id}: {e}")
 
-    embeddings = get_embeddings_from_api(enriched_texts)
-    if not embeddings:
-        logger.error("Failed to get embeddings for enriched image data.")
-        return False
+    # embeddings = get_embeddings_from_api(enriched_texts)
+    # if not embeddings:
+    #     logger.error("Failed to get embeddings for enriched image data.")
+    #     return False
 
-    metadatas = [
-        {
-            "filename": entry["filename"],
-            "page": entry["page"],
-            "caption": entry["caption"],
-            "ai_description": entry.get("ai_description", "")[:500] # Limit size for metadata
-        }
-        for entry in image_index
-    ]
+    # metadatas = [
+    #     {
+    #         "filename": entry["filename"],
+    #         "page": entry["page"],
+    #         "caption": entry["caption"],
+    #         "ai_description": entry.get("ai_description", "")[:500] # Limit size for metadata
+    #     }
+    #     for entry in image_index
+    # ]
 
-    # TODO: Migrate Image similarity search to PostgreSQL pgvector in future iteration.
-    # For now, we only update the MongoDB descriptions to satisfy the UI.
-    logger.info(f"Enriched image index updated in database. Vector indexing for images is deferred.")
+    # # TODO: Migrate Image similarity search to PostgreSQL pgvector in future iteration.
+    # # For now, we only update the MongoDB descriptions to satisfy the UI.
+    # logger.info(f"Enriched image index updated in database. Vector indexing for images is deferred.")
 
-    # Save the updated index back to MongoDB with ai_descriptions
-    await db.save_image_index(document_id, image_index)
-    logger.info(f"Updated image index with AI descriptions saved to database for {document_id}")
+    # # Save the updated index back to MongoDB with ai_descriptions
+    # await db.save_image_index(document_id, image_index)
+    # logger.info(f"Updated image index with AI descriptions saved to database for {document_id}")
 
     return True
 
+
+import spacy
+
+try:
+    nlp = spacy.load("en_core_web_sm")
+except OSError:
+    logger.warning("spaCy model 'en_core_web_sm' not found. NER tagging disabled.")
+    nlp = None
+
+def extract_ner_tags(text: str):
+    if not nlp:
+        return {}
+    
+    doc = nlp(text[:50000]) # Process chunk text
+    entities = {}
+    for ent in doc.ents:
+        if ent.label_ in ["PERSON", "ORG", "GPE", "PRODUCT", "EVENT"]:
+            if ent.label_ not in entities:
+                entities[ent.label_] = set()
+            entities[ent.label_].add(ent.text.strip())
+            
+    return {k: list(v) for k, v in entities.items()}
 
 def process_and_embed(json_path, collection_name, blocks_json_path=None, notebook_id=None):
     """
@@ -335,6 +340,10 @@ def process_and_embed(json_path, collection_name, blocks_json_path=None, noteboo
         logger.error("Failed to get embeddings.")
         return False
 
+    # Extract NER tags for each chunk
+    logger.info("Extracting NER tags using spaCy...")
+    ner_tags_per_chunk = [extract_ner_tags(text) for text in texts]
+
     # Build metadata — bbox fields stored as flat numbers
     metadatas = []
     for i, c in enumerate(tagged_chunks):
@@ -349,6 +358,7 @@ def process_and_embed(json_path, collection_name, blocks_json_path=None, noteboo
             "bbox_y1": bbox[3],
             "page_width": c.get("page_width", 0),
             "page_height": c.get("page_height", 0),
+            "ner_tags": ner_tags_per_chunk[i]
         })
 
     return store_in_pgvector(texts, embeddings, collection_name, metadatas, notebook_id=notebook_id)

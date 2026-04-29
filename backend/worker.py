@@ -28,8 +28,6 @@ def process_pdf_task(self, document_id: str, filename: str, notebook_id: str = N
     Background job to process the PDF.
     """
     logger.info(f"[{document_id}] Starting background processing for {filename}")
-    file_path = os.path.join(DATA_DIR, filename)
-
     try:
         # Run async DB call synchronously inside celery
         loop = asyncio.get_event_loop()
@@ -37,7 +35,12 @@ def process_pdf_task(self, document_id: str, filename: str, notebook_id: str = N
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
-    loop.run_until_complete(db.save_document_metadata(document_id, filename))
+    source = loop.run_until_complete(db.get_source(document_id))
+    if not source:
+        logger.error(f"[{document_id}] Source not found in DB!")
+        return False
+        
+    file_path = source.file_path
 
     text_json_path = os.path.join(EXTRACT_DIR, 'text', f"{document_id}.json")
     blocks_json_path = os.path.join(EXTRACT_DIR, 'text', f"{document_id}_blocks.json")
@@ -80,3 +83,48 @@ def process_pdf_task(self, document_id: str, filename: str, notebook_id: str = N
 
     logger.info(f"[{document_id}] Pipeline completed successfully.")
     return {"status": "SUCCESS", "document_id": document_id}
+
+from llm_utils import map_reduce_summarize, generate_mindmap_json
+from audio_utils import generate_audio
+
+@celery_app.task(bind=True)
+def generate_audio_summary_task(self, notebook_id: str, user_id: str):
+    logger.info(f"Starting audio summary generation for notebook {notebook_id}")
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+    texts = loop.run_until_complete(db.get_notebook_texts(notebook_id, limit=20))
+    if not texts:
+        return {"status": "FAILURE", "error": "No text found for notebook"}
+        
+    script = map_reduce_summarize(texts)
+    
+    # Generate audio
+    output_dir = os.path.join(DATA_DIR, user_id, notebook_id, "audio")
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, "summary.mp3")
+    
+    success = generate_audio(script, output_path)
+    if success:
+        return {"status": "SUCCESS", "audio_path": f"/api/notebooks/{notebook_id}/audio"}
+    else:
+        return {"status": "FAILURE", "error": "TTS failed"}
+
+@celery_app.task(bind=True)
+def generate_mindmap_task(self, notebook_id: str, focus_topic: str):
+    logger.info(f"Starting mindmap generation for notebook {notebook_id} on '{focus_topic}'")
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+    texts = loop.run_until_complete(db.get_notebook_texts(notebook_id, limit=30))
+    if not texts:
+        return {"status": "FAILURE", "error": "No text found for notebook"}
+        
+    json_result = generate_mindmap_json(texts, focus_topic)
+    return {"status": "SUCCESS", "mindmap": json_result}
