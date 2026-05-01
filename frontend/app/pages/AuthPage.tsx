@@ -55,13 +55,13 @@ export function AuthPage() {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-zinc-950 p-4">
-      <div className="max-w-md w-full space-y-8 bg-white dark:bg-zinc-900 p-8 rounded-2xl shadow-xl border border-gray-100 dark:border-zinc-800">
+    <div className="min-h-screen flex items-center justify-center bg-[#111827] p-4" style={{ fontFamily: 'Inter, -apple-system, BlinkMacSystemFont, sans-serif' }}>
+      <div className="max-w-md w-full space-y-8 bg-[#1F2937] p-8 rounded-2xl shadow-2xl border border-[#374151]">
         <div>
-          <h2 className="mt-6 text-center text-3xl font-extrabold text-gray-900 dark:text-white">
+          <h2 className="mt-6 text-center text-3xl font-extrabold text-[#F3F4F6]">
             {isLogin ? 'Welcome back' : 'Create an account'}
           </h2>
-          <p className="mt-2 text-center text-sm text-gray-600 dark:text-zinc-400">
+          <p className="mt-2 text-center text-sm text-[#9CA3AF]">
             {isLogin ? 'Sign in to access your Research Canvas' : 'Start synthesizing your research today'}
           </p>
         </div>
@@ -75,7 +75,7 @@ export function AuthPage() {
                 type="email"
                 autoComplete="email"
                 required
-                className="appearance-none rounded-lg relative block w-full px-3 py-2 border border-gray-300 dark:border-zinc-700 placeholder-gray-500 dark:placeholder-zinc-500 text-gray-900 dark:text-white bg-white dark:bg-zinc-800 focus:outline-none focus:ring-blue-500 focus:border-blue-500 focus:z-10 sm:text-sm"
+                className="appearance-none rounded-md relative block w-full px-4 py-2.5 border border-[#374151] focus:border-[#3B82F6] placeholder:text-[#6B7280] text-[#F3F4F6] bg-[#111827] focus:outline-none transition-colors sm:text-sm"
                 placeholder="Email address"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
@@ -89,7 +89,7 @@ export function AuthPage() {
                 type="password"
                 autoComplete="current-password"
                 required
-                className="appearance-none rounded-lg relative block w-full px-3 py-2 border border-gray-300 dark:border-zinc-700 placeholder-gray-500 dark:placeholder-zinc-500 text-gray-900 dark:text-white bg-white dark:bg-zinc-800 focus:outline-none focus:ring-blue-500 focus:border-blue-500 focus:z-10 sm:text-sm"
+                className="appearance-none rounded-md relative block w-full px-4 py-2.5 border border-[#374151] focus:border-[#3B82F6] placeholder:text-[#6B7280] text-[#F3F4F6] bg-[#111827] focus:outline-none transition-colors sm:text-sm"
                 placeholder="Password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
@@ -98,7 +98,7 @@ export function AuthPage() {
           </div>
 
           {error && (
-            <div className="text-red-500 text-sm text-center bg-red-50 dark:bg-red-900/20 p-2 rounded">
+            <div className="text-[#EF4444] text-sm text-center bg-[#EF4444]/10 border border-[#EF4444]/30 p-2 rounded-md">
               {error}
             </div>
           )}
@@ -108,7 +108,7 @@ export function AuthPage() {
               type="submit"
               disabled={loading}
               className={cn(
-                "group relative w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-lg text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition-colors",
+                "group relative w-full flex justify-center py-2.5 px-4 border border-transparent text-sm font-medium rounded-lg text-white bg-[#3B82F6] hover:bg-[#2563EB] focus:outline-none transition-colors",
                 loading && "opacity-70 cursor-not-allowed"
               )}
             >
@@ -123,7 +123,7 @@ export function AuthPage() {
               setIsLogin(!isLogin);
               setError('');
             }}
-            className="text-sm font-medium text-blue-600 hover:text-blue-500 dark:text-blue-400 dark:hover:text-blue-300"
+            className="text-sm font-medium text-[#3B82F6] hover:text-[#60A5FA] transition-colors"
           >
             {isLogin ? "Don't have an account? Sign up" : 'Already have an account? Sign in'}
           </button>

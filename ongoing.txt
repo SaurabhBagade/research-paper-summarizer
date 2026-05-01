@@ -1,0 +1,26 @@
+now generate individual task that need to be done for this phase ### Phase 3: Asynchronous Task Processing (Celery + Redis)
+*Grouping: Infrastructure & Background Jobs*
+
+1. **Setup Infrastructure**
+   - Add Redis and Celery worker to `docker-compose.yaml`.
+   - Configure Celery in the FastAPI/Python backend.
+2. **Asynchronous Audio Synthesis (Edge-TTS)**
+   - Create a Celery task for Map-Reduce summarization + Edge-TTS audio generation.
+   - Create endpoint `/api/canvas/{id}/audio-summary` that triggers the task and returns a `task_id`.
+   - Create endpoint `/api/tasks/{task_id}` for the UI to poll progress.
+3. **Asynchronous Mindmap Generation**
+   - Create a Celery task that prompts Gemma4 to output structured JSON representing nodes and edges based on the canvas content.
+   - Create endpoint `/api/canvas/{id}/mindmap` that triggers the task and returns a `task_id`.
+   - Add capability to "expand" a node as a separate async task.
+
+
+
+
+proceed with phase 1, and for UI always use a axios interceptor that willhandle auth part of attaching the token in the request.
+
+
+1. store the audio files in /app/data_pdf/{user_id}/{notebook_id}/audio/ like the pdf's
+2. explain to me both approaches 
+	- synchronous call in celery worker via API
+	- internal utility call
+do not proceed with implementation

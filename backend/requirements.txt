@@ -19,3 +19,4 @@ passlib[bcrypt]
 python-jose[cryptography]
 pydantic[email]
 edge-tts
+langdetect

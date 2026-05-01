@@ -36,6 +36,7 @@ export function NotebookDashboard({ onSelectNotebook }: NotebookDashboardProps) 
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [newTitle, setNewTitle] = useState('');
   const [newDesc, setNewDesc] = useState('');
+  const [newLanguage, setNewLanguage] = useState('Auto-detect');
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
   const [activeTab, setActiveTab] = useState('all');
   const [searchQuery, setSearchQuery] = useState('');
@@ -71,12 +72,14 @@ export function NotebookDashboard({ onSelectNotebook }: NotebookDashboardProps) 
         title: newTitle.trim(),
         description: newDesc.trim(),
         color: '#3B82F6',
+        language: newLanguage,
       });
       if (data.notebook) {
         setNotebooks(prev => [data.notebook, ...prev]);
         setShowCreateModal(false);
         setNewTitle('');
         setNewDesc('');
+        setNewLanguage('Auto-detect');
         onSelectNotebook(data.notebook.id);
       }
     } catch (e) {
@@ -117,9 +120,6 @@ export function NotebookDashboard({ onSelectNotebook }: NotebookDashboardProps) 
             <h1 className="text-xl font-semibold text-[#F3F4F6]">ResearchLM</h1>
           </div>
           <div className="flex items-center gap-2">
-            <button className="p-2 text-[#9CA3AF] hover:text-[#F3F4F6] hover:bg-[#374151] rounded-md transition-colors">
-              <Settings className="h-5 w-5" />
-            </button>
             <button 
               onClick={logout}
               className="p-2 text-[#9CA3AF] hover:text-red-400 hover:bg-[#374151] rounded-md transition-colors"
@@ -127,16 +127,13 @@ export function NotebookDashboard({ onSelectNotebook }: NotebookDashboardProps) 
             >
               <LogOut className="h-5 w-5" />
             </button>
-            <button className="bg-[#3B82F6] hover:bg-[#2563EB] text-white text-sm font-semibold px-4 py-1.5 rounded-md transition-colors">
-              PRO
-            </button>
           </div>
         </div>
 
         {/* Tabs and Controls */}
         <div className="px-8 pb-3 flex items-center justify-between gap-4 flex-wrap">
           <div className="flex gap-1">
-            {(['all', 'my', 'featured'] as const).map(tab => (
+            {(['all', 'my'] as const).map(tab => (
               <button
                 key={tab}
                 onClick={() => setActiveTab(tab)}
@@ -146,7 +143,7 @@ export function NotebookDashboard({ onSelectNotebook }: NotebookDashboardProps) 
                     : 'text-[#9CA3AF] hover:text-[#F3F4F6] hover:bg-[#374151]/50'
                 }`}
               >
-                {tab === 'all' ? 'All' : tab === 'my' ? 'My Notebooks' : 'Featured'}
+                {tab === 'all' ? 'All' : 'My Notebooks'}
               </button>
             ))}
           </div>
@@ -373,6 +370,25 @@ export function NotebookDashboard({ onSelectNotebook }: NotebookDashboardProps) 
                   rows={3}
                   className="w-full bg-[#111827] border border-[#374151] focus:border-[#3B82F6] text-[#F3F4F6] placeholder:text-[#6B7280] rounded-md px-4 py-2.5 text-sm focus:outline-none transition-colors resize-none"
                 />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-[#9CA3AF] mb-1.5 uppercase tracking-wide">Language</label>
+                <select
+                  value={newLanguage}
+                  onChange={e => setNewLanguage(e.target.value)}
+                  className="w-full bg-[#111827] border border-[#374151] focus:border-[#3B82F6] text-[#F3F4F6] rounded-md px-4 py-2.5 text-sm focus:outline-none transition-colors appearance-none"
+                >
+                  <option value="Auto-detect">Auto-detect from sources</option>
+                  <option value="English">English</option>
+                  <option value="Spanish">Spanish</option>
+                  <option value="French">French</option>
+                  <option value="German">German</option>
+                  <option value="Hindi">Hindi</option>
+                  <option value="Bengali">Bengali</option>
+                  <option value="Telugu">Telugu</option>
+                  <option value="Chinese">Chinese</option>
+                  <option value="Japanese">Japanese</option>
+                </select>
               </div>
               <div className="flex justify-end gap-3 pt-1">
                 <button

@@ -110,7 +110,8 @@ async def create_notebook(req: dict, current_user = Depends(get_current_user)):
     title = req.get("title", "New Notebook")
     description = req.get("description", "")
     color = req.get("color", "#3B82F6")
-    nb = await db.create_notebook(title, description, color, current_user.id)
+    language = req.get("language", "Auto-detect")
+    nb = await db.create_notebook(title, description, color, language, current_user.id)
     return {"status": "success", "notebook": nb}
 
 @app.get("/api/notebooks")
@@ -118,11 +119,27 @@ async def get_notebooks(current_user = Depends(get_current_user)):
     nbs = await db.get_notebooks(current_user.id)
     return {"notebooks": nbs}
 
+@app.patch("/api/notebooks/{notebook_id}")
+async def update_notebook(notebook_id: str, req: dict, current_user = Depends(get_current_user)):
+    if "language" in req:
+        await db.update_notebook_language(notebook_id, req["language"])
+    
+    nb = await db.get_notebook(notebook_id)
+    return {"status": "success", "notebook": nb}
+
 @app.get("/api/notebooks/{notebook_id}")
-async def get_notebook(notebook_id: str):
+async def get_notebook(notebook_id: str, current_user = Depends(get_current_user)):
     nb = await db.get_notebook(notebook_id)
     if not nb:
         raise HTTPException(status_code=404, detail="Notebook not found")
+        
+    # Check if pre-generated content exists on disk (or in the db document)
+    audio_path = os.path.join(DATA_DIR, current_user.id, notebook_id, "audio", "summary.mp3")
+    nb['audio_generated'] = os.path.exists(audio_path)
+    
+    mindmap_path = os.path.join(DATA_DIR, current_user.id, notebook_id, "mindmap", "mindmap.json")
+    nb['mindmap_generated'] = os.path.exists(mindmap_path) or ("mindmap" in nb and nb["mindmap"] is not None)
+
     return {"notebook": nb}
 
 @app.get("/api/notebooks/{notebook_id}/sources")
@@ -305,21 +322,36 @@ async def ask_question(req: AskRequest):
             history_lines = []
             for msg in recent_messages:
                 role = "User" if msg.get("type") == "user" else "Assistant"
-                history_lines.append(f"{role}: {msg.get('content', '')}")
+                content = msg.get("content", "")
+                content_clean = re.sub(r'<think>[\s\S]*?</think>', '', content).strip()
+                history_lines.append(f"{role}: {content_clean}")
             history_text = "\n".join(history_lines)
             logger.info(f"Injecting {len(recent_messages)} history messages into prompt.")
         
+        # Get Notebook Language Preference
+        notebook_lang = "English"
+        if req.notebook_id:
+            nb_data = await db.get_notebook(req.notebook_id)
+            if nb_data:
+                notebook_lang = nb_data.get("language", "English")
+
         # 5. Build the prompt — include history only if it exists
+        system_directive = (
+            f"You are a helpful research assistant. The user's preferred language for this session is {notebook_lang}. "
+            f"You MUST answer all queries and formulate your explanations in {notebook_lang}, unless explicitly instructed otherwise. "
+            "Answer the question directly using the provided paper context. Do NOT use introductory phrases like 'Based on the provided context', 'According to the paper', or 'Here is the answer'. First, share your reasoning process inside <think>...</think> tags. If you use mathematical formulas, enclose them in $ for inline and $$ for block math.\n\n"
+        )
+
         if history_text:
             prompt = (
-                f"You are a helpful research assistant. Use the provided paper context to answer the question.\n\n"
+                system_directive +
                 f"Paper Context:\n{context_text}\n\n"
                 f"Conversation so far:\n{history_text}\n\n"
                 f"User: {req.query}\nAssistant:"
             )
         else:
             prompt = (
-                f"You are a helpful research assistant. Use the provided paper context to answer the question.\n\n"
+                system_directive +
                 f"Paper Context:\n{context_text}\n\n"
                 f"User: {req.query}\nAssistant:"
             )
@@ -343,7 +375,7 @@ async def ask_question(req: AskRequest):
         # Sentence-level highlighting: split each context chunk into sentences,
         # search for each in the PDF page → get one rect per matching line (marker effect).
         # Falls back to stored union bbox if the PDF cannot be opened.
-        import re, fitz as _fitz
+        import fitz as _fitz
 
         context_highlights = []
         _pdf_path = None
@@ -502,9 +534,12 @@ async def get_task_status(task_id: str):
 class MindmapRequest(BaseModel):
     focus_topic: str
 
+class AudioRequest(BaseModel):
+    target_language: str = "English"
+
 @app.post("/api/notebooks/{notebook_id}/audio-summary")
-async def request_audio_summary(notebook_id: str, current_user = Depends(get_current_user)):
-    task = generate_audio_summary_task.delay(notebook_id, current_user.id)
+async def request_audio_summary(notebook_id: str, req: AudioRequest, current_user = Depends(get_current_user)):
+    task = generate_audio_summary_task.delay(notebook_id, current_user.id, req.target_language)
     return {"status": "success", "task_id": task.id}
 
 @app.get("/api/notebooks/{notebook_id}/audio")
@@ -527,13 +562,25 @@ async def serve_audio_summary(notebook_id: str, token: str = None):
 
 @app.post("/api/notebooks/{notebook_id}/mindmap")
 async def request_mindmap(notebook_id: str, req: MindmapRequest, current_user = Depends(get_current_user)):
-    task = generate_mindmap_task.delay(notebook_id, req.focus_topic)
+    task = generate_mindmap_task.delay(notebook_id, current_user.id, req.focus_topic, False)
     return {"status": "success", "task_id": task.id}
+
+@app.get("/api/notebooks/{notebook_id}/mindmap")
+async def serve_mindmap(notebook_id: str, current_user = Depends(get_current_user)):
+    # Check database first if get_mindmap db function exists
+    if hasattr(db, "get_mindmap"):
+        mm = await db.get_mindmap(notebook_id)
+        if mm:
+            return mm
+            
+    mindmap_path = os.path.join(DATA_DIR, current_user.id, notebook_id, "mindmap", "mindmap.json")
+    if not os.path.exists(mindmap_path):
+        raise HTTPException(status_code=404, detail="Mindmap not found or not generated yet.")
+    return FileResponse(path=mindmap_path, media_type="application/json")
 
 @app.post("/api/notebooks/{notebook_id}/mindmap/expand")
 async def request_mindmap_expand(notebook_id: str, req: MindmapRequest, current_user = Depends(get_current_user)):
-    # Reuses the mindmap generation task but targeted
-    task = generate_mindmap_task.delay(notebook_id, req.focus_topic)
+    task = generate_mindmap_task.delay(notebook_id, current_user.id, req.focus_topic, True)
     return {"status": "success", "task_id": task.id}
 
 if __name__ == "__main__":

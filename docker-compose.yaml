@@ -96,7 +96,7 @@ services:
   celery_worker:
     build:
       context: ./backend
-    command: celery -A worker.celery_app worker --loglevel=info
+    command: celery -A worker.celery_app worker --loglevel=info --concurrency=1
     environment:
       - DATABASE_URL=postgresql+psycopg2://research_user:secure_password@postgres:5432/research_db
       - REDIS_URL=redis://redis:6379/0
@@ -128,6 +128,8 @@ services:
       - /app/node_modules
     environment:
       - VITE_API_URL=http://backend:8080
+      - CHOKIDAR_USEPOLLING=true
+      - WATCHPACK_POLLING=true
     restart: always
     deploy:
       resources:
@@ -144,5 +146,3 @@ networks:
 
 volumes:
   postgres_data:
-
-

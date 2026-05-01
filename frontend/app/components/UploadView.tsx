@@ -23,29 +23,39 @@ export function UploadView({ onUploadComplete, notebookId }: UploadViewProps) {
     setIsDragging(false);
   }, []);
 
-  const uploadFile = async (file: File) => {
-    if (file.type !== 'application/pdf') {
-      setError('Please upload a PDF file');
+  const uploadFiles = async (files: File[]) => {
+    const pdfFiles = files.filter(f => f.type === 'application/pdf');
+    if (pdfFiles.length === 0) {
+      setError('Please upload at least one PDF file');
       return;
     }
 
-    setFileName(file.name);
+    setFileName(`Uploading 0 of ${pdfFiles.length} files...`);
     setIsUploading(true);
     setError(null);
 
-    const formData = new FormData();
-    formData.append('file', file);
-    if (notebookId) {
-      formData.append('notebook_id', notebookId);
-    }
-
     try {
-      const { data } = await apiClient.post('/api/upload-pdf', formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
+      let completed = 0;
+      const uploadPromises = pdfFiles.map(async (file) => {
+        const formData = new FormData();
+        formData.append('file', file);
+        if (notebookId) {
+          formData.append('notebook_id', notebookId);
+        }
+        const res = await apiClient.post('/api/upload-pdf', formData, {
+          headers: { 'Content-Type': 'multipart/form-data' },
+        });
+        completed++;
+        setFileName(`Uploading ${completed} of ${pdfFiles.length} files...`);
+        return res;
       });
-      onUploadComplete(data.document_id, file.name);
+
+      const responses = await Promise.all(uploadPromises);
+      if (responses.length > 0) {
+        onUploadComplete(responses[0].data.document_id, pdfFiles[0].name);
+      }
     } catch {
-      setError('Failed to upload and process the PDF. Please try again.');
+      setError('Failed to upload and process the PDFs. Please try again.');
       setIsUploading(false);
     }
   };
@@ -54,16 +64,16 @@ export function UploadView({ onUploadComplete, notebookId }: UploadViewProps) {
     e.preventDefault();
     setIsDragging(false);
 
-    const file = e.dataTransfer.files[0];
-    if (file) {
-      uploadFile(file);
+    const files = Array.from(e.dataTransfer.files);
+    if (files.length > 0) {
+      uploadFiles(files);
     }
   }, []);
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      uploadFile(file);
+    const files = Array.from(e.target.files || []);
+    if (files.length > 0) {
+      uploadFiles(files);
     }
   };
 
@@ -126,6 +136,7 @@ export function UploadView({ onUploadComplete, notebookId }: UploadViewProps) {
                     id="file-upload"
                     className="hidden"
                     accept=".pdf"
+                    multiple
                     onChange={handleFileSelect}
                   />
                   <label

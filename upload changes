@@ -1,0 +1,40 @@
+# Goal Description
+Enable multiple parallel PDF uploads and track their processing status individually in the UI. Ensure users cannot interact with papers that are still processing, and provide visual loading feedback for each paper. Also, verify the flow from upload to processing to ensure robust execution.
+
+## Proposed Changes
+
+### Backend
+
+#### [MODIFY] backend/models.py
+- Add `status = Column(String(50), default='processing')` to the `Source` model to track extraction state.
+
+#### [MODIFY] backend/db.py
+- Add a new async function `update_source_status(source_id: str, status: str)` to update the status in the DB.
+- Update `get_sources(notebook_id: str)` to return the `status` field in its dictionary response.
+
+#### [MODIFY] backend/worker.py
+- Modify `process_pdf_task` to update the source status:
+  - Set status to `'ready'` upon successful completion of the pipeline.
+  - Set status to `'failed'` if the pipeline returns early or throws an exception.
+
+### Frontend
+
+#### [MODIFY] frontend/app/components/SourceLibrary.tsx
+- Add the `multiple` attribute to the `<input type="file">` to allow selecting multiple PDFs.
+- Modify `handleFileChange` to process an array of files, making concurrent `/api/upload-pdf` requests.
+- Implement a global polling mechanism that checks `/api/notebooks/{notebook_id}/sources` every few seconds as long as there is at least one source with `status === 'processing'`.
+- Update the source rendering logic:
+  - Show a spinner icon (`Loader2`) if `source.status === 'processing'`.
+  - Disable row clicks (e.g., selection or opening the PDF) if the source is processing.
+
+#### [MODIFY] frontend/app/components/UploadView.tsx (if applicable)
+- Verify and adapt any similar upload logic here to accommodate the new multi-file response and processing state.
+
+## Verification Plan
+
+### Automated/Manual Verification
+- Restart the backend to apply the `models.py` schema changes (this will trigger the `init_db` flow).
+- Upload 2 or more PDFs simultaneously via the "Add sources" button.
+- Verify that multiple background tasks are kicked off.
+- Check the UI: both papers should appear in the source list with loading spinners. The user should not be able to interact with them.
+- As each task completes, the corresponding paper's spinner should disappear, and the user should be able to view it, while the other paper continues processing.

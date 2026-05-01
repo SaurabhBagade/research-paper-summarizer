@@ -144,7 +144,7 @@ def get_embeddings_from_api(chunks):
         return None
 
 
-def store_in_pgvector(chunks, embeddings, collection_name, metadatas, notebook_id=None):
+def store_in_pgvector(chunks, embeddings, collection_name, metadatas, notebook_id=None, doc_metadata=None):
     """Stores chunks and embeddings in PostgreSQL pgvector."""
     logger.info(f"Connecting to PostgreSQL to save {len(chunks)} chunks for '{collection_name}'...")
     try:
@@ -154,7 +154,7 @@ def store_in_pgvector(chunks, embeddings, collection_name, metadatas, notebook_i
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             
-        loop.run_until_complete(db.save_document_chunks(collection_name, chunks, embeddings, metadatas, notebook_id=notebook_id))
+        loop.run_until_complete(db.save_document_chunks(collection_name, chunks, embeddings, metadatas, notebook_id=notebook_id, doc_metadata=doc_metadata))
         logger.info("Successfully stored chunks in PostgreSQL.")
         return True
     except Exception as e:
@@ -275,8 +275,14 @@ import spacy
 try:
     nlp = spacy.load("en_core_web_sm")
 except OSError:
-    logger.warning("spaCy model 'en_core_web_sm' not found. NER tagging disabled.")
-    nlp = None
+    logger.info("spaCy model 'en_core_web_sm' not found. Attempting to download...")
+    import spacy.cli
+    try:
+        spacy.cli.download("en_core_web_sm")
+        nlp = spacy.load("en_core_web_sm")
+    except Exception as e:
+        logger.error(f"Failed to download spaCy model: {e}")
+        nlp = None
 
 def extract_ner_tags(text: str):
     if not nlp:
@@ -343,6 +349,16 @@ def process_and_embed(json_path, collection_name, blocks_json_path=None, noteboo
     # Extract NER tags for each chunk
     logger.info("Extracting NER tags using spaCy...")
     ner_tags_per_chunk = [extract_ner_tags(text) for text in texts]
+    
+    # Aggregate NER tags for the document
+    aggregated_ner = {}
+    for tags in ner_tags_per_chunk:
+        for k, v_list in tags.items():
+            if k not in aggregated_ner:
+                aggregated_ner[k] = set()
+            aggregated_ner[k].update(v_list)
+            
+    doc_ner_tags = {k: list(v)[:5] for k, v in aggregated_ner.items() if v}
 
     # Build metadata — bbox fields stored as flat numbers
     metadatas = []
@@ -361,7 +377,8 @@ def process_and_embed(json_path, collection_name, blocks_json_path=None, noteboo
             "ner_tags": ner_tags_per_chunk[i]
         })
 
-    return store_in_pgvector(texts, embeddings, collection_name, metadatas, notebook_id=notebook_id)
+    doc_metadata = {"ner_tags": doc_ner_tags}
+    return store_in_pgvector(texts, embeddings, collection_name, metadatas, notebook_id=notebook_id, doc_metadata=doc_metadata)
 
 if __name__ == "__main__":
     import glob

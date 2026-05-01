@@ -157,9 +157,9 @@ async def get_document_metadata(document_id: str):
 
 # --- Notebook & Source Management ---
 
-async def create_notebook(title: str, description: str = None, color: str = None, user_id: str = None):
+async def create_notebook(title: str, description: str = None, color: str = None, language: str = "Auto-detect", user_id: str = None):
     async with AsyncSessionLocal() as session:
-        notebook = Notebook(title=title, description=description, color=color, user_id=user_id)
+        notebook = Notebook(title=title, description=description, color=color, language=language, user_id=user_id)
         session.add(notebook)
         await session.commit()
         return {
@@ -167,7 +167,8 @@ async def create_notebook(title: str, description: str = None, color: str = None
             "title": notebook.title,
             "description": notebook.description,
             "color": notebook.color,
-            "created_at": notebook.created_at
+            "created_at": notebook.created_at,
+            "language": getattr(notebook, 'language', 'Auto-detect')
         }
 
 async def get_notebooks(user_id: str):
@@ -180,6 +181,7 @@ async def get_notebooks(user_id: str):
                 "title": nb.title,
                 "description": nb.description,
                 "color": nb.color,
+                "language": getattr(nb, 'language', 'English'),
                 "created_at": nb.created_at
             }
             for nb in notebooks
@@ -198,7 +200,16 @@ async def get_notebook(notebook_id: str):
             "title": nb.title,
             "description": nb.description,
             "color": nb.color,
+            "language": getattr(nb, 'language', 'English'),
         }
+
+async def update_notebook_language(notebook_id: str, language: str):
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(Notebook).filter_by(id=notebook_id))
+        nb = result.scalar_one_or_none()
+        if nb:
+            nb.language = language
+            await session.commit()
 
 async def create_source(document_id: str, title: str, file_path: str, notebook_id: str, user_id: str):
     async with AsyncSessionLocal() as session:
@@ -218,12 +229,20 @@ async def get_sources(notebook_id: str):
     async with AsyncSessionLocal() as session:
         result = await session.execute(select(Source).filter_by(notebook_id=notebook_id))
         sources = result.scalars().all()
-        return [{"id": s.id, "title": s.title, "file_path": s.file_path} for s in sources]
+        return [{"id": s.id, "title": s.title, "file_path": s.file_path, "status": s.status, "metadata_json": s.metadata_json} for s in sources]
 
 async def get_source(source_id: str):
     async with AsyncSessionLocal() as session:
         result = await session.execute(select(Source).filter_by(id=source_id))
         return result.scalar_one_or_none()
+
+async def update_source_status(source_id: str, status: str):
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(Source).filter_by(id=source_id))
+        source = result.scalar_one_or_none()
+        if source:
+            source.status = status
+            await session.commit()
 
 async def delete_source(source_id: str) -> str | None:
     async with AsyncSessionLocal() as session:
@@ -260,7 +279,7 @@ async def get_notebook_texts(notebook_id: str, limit: int = 50) -> list[str]:
         )
         return result.scalars().all()
 
-async def save_document_chunks(document_id: str, chunks: list, embeddings: list, metadatas: list, notebook_id: str = None):
+async def save_document_chunks(document_id: str, chunks: list, embeddings: list, metadatas: list, notebook_id: str = None, doc_metadata: dict = None):
     """
     Saves document text chunks and their Specter2 embeddings to PostgreSQL, linking to an optional notebook_id.
     """
@@ -271,10 +290,13 @@ async def save_document_chunks(document_id: str, chunks: list, embeddings: list,
         if not source:
             source = Source(id=document_id, title=document_id, file_path=document_id, notebook_id=notebook_id)
             session.add(source)
-            await session.commit()
         elif notebook_id and not source.notebook_id:
             source.notebook_id = notebook_id
-            await session.commit()
+            
+        if doc_metadata is not None:
+            source.metadata_json = doc_metadata
+            
+        await session.commit()
             
         # Delete existing chunks for this document (replacing collection)
         await session.execute(delete(DocumentChunk).where(DocumentChunk.source_id == document_id))
