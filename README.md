@@ -1,116 +1,111 @@
-# Research Paper Summarizer & Chatbot
+# Research Paper Summarizer (Research Canvas)
 
-A Dockerized pipeline to ingest research papers (PDFs), extract text/images/tables, chunk the text, generate vector embeddings using local ML models, and store them in a Vector Database (ChromaDB) for retrieval-augmented generation (RAG) tasks.
+An advanced, local-first, multimodal AI platform designed to help researchers, students, and professionals efficiently analyze, summarize, and interact with complex research papers. 
 
-## 🏗️ Architecture
+The project introduces the concept of a **"Research Canvas"**—a unified workspace where users can upload PDFs, extract multi-modal data (text, tables, images), chat with their documents using RAG (Retrieval-Augmented Generation), and generate rich enhancements like Podcast-style Audio Summaries and interactive Mindmaps.
 
-This project has been refactored from a heavy Apache Airflow distributed pipeline into a lightweight, fast, containerized FastAPI backend. The entire stack runs locally via Docker Compose.
+---
 
-There are three primary containers:
-1. **`backend`**: A FastAPI orchestrator. It receives PDF uploads, handles the extraction (PyMuPDF, pdfplumber), chunks the text (Langchain), and coordinates with the other containers.
-2. **`model_api`**: A local Machine Learning API running on PyTorch/CUDA. It loads `allenai/specter2_base` for generating embeddings and delegates text & vision generation to a local Ollama server (Mistral 7B + Moondream).
-3. **`chromadb`**: The local Vector Database where all embedded document chunks are persistently stored.
+## 🌟 Key Features
 
-## 🚀 Getting Started
+- **Advanced Document Ingestion:** Extracts text, crops images, and parses tables from complex PDF layouts using `PyMuPDF` and `pdfplumber`.
+- **Smart Tagging (NER):** Utilizes `spaCy` to automatically extract key metadata such as Authors, Datasets, Metrics, and Algorithms.
+- **Interactive "Research Canvas" UI:** A sleek 3-pane interface:
+  1. **Sources (Left):** Manages uploaded PDFs, displays NER tags, and highlights source citations.
+  2. **Chat (Middle):** A Socratic, RAG-powered chatbot utilizing local LLMs to answer questions with exact citations.
+  3. **Enhancements (Right):** Houses interactive generated assets like Audio and Mindmaps.
+- **Podcast-Style Audio Summaries:** Uses `Edge-TTS` to generate natural-sounding audio summaries via async tasks (requires 0MB local VRAM).
+- **Interactive Mindmaps:** Dynamically generates structured JSON via the LLM to visualize core concepts using React Flow.
+- **Secure & Isolated:** JWT-based authentication ensuring isolated workspaces for different users.
+- **Fully Local AI:** Completely local, privacy-preserving AI inference powered by `Ollama` running Gemma4.
+
+---
+
+## 🏗️ System Architecture
+
+The application is fully containerized and consists of several interconnected microservices orchestrated via Docker Compose.
+
+### 1. Frontend (`frontend` container)
+- **Stack:** React, Vite, TailwindCSS, React Flow.
+- **Role:** Serves the highly interactive 3-pane UI. Communicates with the Backend API, renders markdown/images in chat, and polls the backend for asynchronous task progress.
+
+### 2. Backend Orchestrator (`backend` container)
+- **Stack:** FastAPI, Python, LangChain, spaCy.
+- **Role:** The central brain of the application. It handles API routing, JWT authentication, PDF chunking/parsing, and orchestrates the Retrieval-Augmented Generation (RAG) pipeline.
+
+### 3. Model API (`model_api` container)
+- **Stack:** FastAPI, PyTorch.
+- **Role:** A dedicated lightweight API gateway that proxies requests to the heavy local LLM instances. It connects to the host machine's native `Ollama` server (running `gemma4:e2b`).
+
+### 4. Vector Database (`postgres` container)
+- **Stack:** PostgreSQL + `pgvector`.
+- **Role:** Stores relational data (Users, Canvas Metadata) alongside high-dimensional vector embeddings of document chunks for semantic search.
+
+### 5. Asynchronous Task Queue (`redis` & `celery_worker` containers)
+- **Stack:** Redis (Message Broker), Celery (Worker).
+- **Role:** Offloads long-running, CPU-intensive tasks from the main FastAPI thread. Currently handles:
+  - Background PDF extraction and vectorization.
+  - **Audio Generation:** Map-Reduce summarization followed by Edge-TTS audio synthesis.
+  - **Mindmap Generation:** Prompting the LLM for structured JSON representations of the paper's concepts.
+
+---
+
+## ⚙️ How It Works (The Data Flow)
+
+### Phase 1: Ingestion & Extraction
+1. A user uploads a research paper (PDF) to their personalized Research Canvas.
+2. The FastAPI backend saves the file and queues an ingestion task via Celery.
+3. The Celery worker uses `PyMuPDF`/`pdfplumber` to extract text blocks, tables, and crops images, saving them to the local disk volume.
+4. `spaCy` runs over the text to extract Named Entities (Authors, Metrics, etc.).
+5. Text is chunked, embedded, and stored in the `pgvector` database.
+
+### Phase 2: Conversational RAG
+1. The user asks a question in the Middle Pane.
+2. The Backend embeds the query and retrieves the most relevant text chunks and associated image paths from PostgreSQL.
+3. The context is bundled into a Socratic prompt and sent to the `model_api` (which forwards to the local Gemma4 model).
+4. The LLM streams a response back to the frontend, including source citations (e.g., `[1]`). Clicking these citations highlights the original text in the Left Pane.
+
+### Phase 3: Enhancements (Async Generation)
+1. The user clicks "Generate Audio" or "Generate Mindmap" in the Right Pane.
+2. A Celery task is dispatched, and the UI receives a `task_id` to poll for progress.
+3. **For Audio:** The text is summarized via Map-Reduce, passed to Edge-TTS, and an MP3 file is saved to storage.
+4. **For Mindmap:** Gemma4 generates a structured node/edge JSON graph representing the paper.
+5. The frontend fetches the finalized assets and renders the custom Audio Player or React Flow interactive map.
+
+---
+
+## 🚀 Running the Project Locally
 
 ### Prerequisites
-- Docker and Docker Compose installed.
-- (Optional but Recommended) NVIDIA GPU with latest drivers and Docker NVIDIA Container Toolkit installed (for GPU-accelerated inference in `model_api`).
+- Docker and Docker Compose
+- Ollama installed natively on your host machine.
+- The `gemma4:e2b` model pulled locally via Ollama (`ollama run gemma4:e2b`).
 
-### Setup
+### Start the Stack
 
-1. **Clone the repository and enter the directory:**
-   ```bash
-   git clone <repository_url>
-   cd research-paper-summarizer
-   ```
+1. Clone the repository and navigate to the project root.
+2. Create a `.env` file and configure your environment variables (e.g., `HF_TOKEN`, `JWT_SECRET`).
+3. Build and launch the containers:
 
-2. **Configure Environment Variables:**
-   Create a `.env` file in the root directory (where `docker-compose.yaml` is located) with your HuggingFace token (needed for downloading the model data if required):
-   ```env
-   HF_TOKEN=your_huggingface_token
-   ```
-
-3. **Start the Project:**
-   Start all components in detached mode:
-   ```bash
-   docker-compose up -d --build
-   ```
-   *Note: On the very first boot, the `model_api` container will download the Specter2 model (~1-2 GB) into the `model_api/cache` directory. Ollama will manage its own model downloads (e.g., Mistral 7B and Moondream) inside the `ollama` container.*
-
-4. **Verify it is running:**
-   Check the status of the containers:
-   ```bash
-   docker-compose ps
-   ```
-   You should see `backend`, `model_api`, and `chromadb` with a state of `Up`.
-
-### 🔧 Managing the Application
-
-**View Logs:**
-To see what the containers are doing (useful for debugging or tracking the model downloads and document extraction progress):
 ```bash
-docker-compose logs -f
-```
-*(Press `Ctrl+C` to exit log view)*
-
-**Stop the Application:**
-To gracefully stop the containers (without deleting any persisted data):
-```bash
-docker-compose stop
+docker-compose up --build -d
 ```
 
-**Tear Down:**
-To stop and remove containers and networks (your persisted vectorstore in `./EXTRACT` and model cache in `model_api/cache` will remain safe on your disk):
-```bash
-docker-compose down
-```
+### Accessing the Application
+- **Frontend UI:** `http://localhost:3001`
+- **Backend API Docs:** `http://localhost:8080/docs`
+- **Model API Docs:** `http://localhost:8008/docs`
 
-**CPU-Only Mode (If you don't have an NVIDIA GPU):**
-By default, the `docker-compose.yaml` expects an NVIDIA GPU. If you don't have one and get an error starting the `model_api` container, open `docker-compose.yaml` and comment out or delete the `deploy:` block (and its child attributes) under the `model_api` service. Then run `docker-compose up -d --build` again.
+---
 
-### Usage
+## 🔒 Data Isolation & Security
 
-1. **Access the Backend API Documentation:**
-   Open your browser and navigate to: [http://localhost:8080/docs](http://localhost:8080/docs)
-   
-2. **Upload a PDF:**
-   - Find the `POST /upload-pdf` endpoint in the Swagger UI.
-   - Click "Try it out", select a PDF file, and execute.
-   - The backend will:
-     - Save the PDF to `data_pdf/`.
-     - Extract text, images, and tables into the `EXTRACT/` folder.
-     - Chunk the extracted text.
-     - Call the `model_api` container to fetch Specter2 embeddings.
-     - Store the documents and embeddings into ChromaDB.
+This application is built with a robust JWT authentication layer. Every File, Extracted Asset, and Chat Session is strictly bound to a `user_id`. Users can only access the "Research Canvases" they have explicitly created, ensuring data privacy across multiple users on the same instance.
 
-## 📁 Directory Structure
+---
 
-```text
-.
-├── backend/                  # Orchestration FastAPI App
-│   ├── main.py               # API Endpoints and logic flow
-│   ├── extraction_utils.py   # PDF text, image, and table extraction logic
-│   ├── embedding_utils.py    # Langchain chunking and ChromaDB insertion
-│   ├── Dockerfile            # Python 3.10 slim environment
-│   └── requirements.txt
-├── model_api/                # Local ML Inference App
-│   ├── app.py                # FastAPI endpoints for /embed and /generate
-│   ├── Dockerfile            # PyTorch CUDA environment
-│   └── requirements.txt
-├── docker-compose.yaml       # Defines networking, volumes, and services
-└── EXTRACT/                  # Output directory (auto-generated)
-    ├── images/
-    ├── tables/
-    ├── text/
-    └── vectorstore/          # ChromaDB persistent storage
-```
+## 🔮 Future Roadmap
 
-## 🛠️ Built With
-
-- **[FastAPI](https://fastapi.tiangolo.com/)**: Fast, modern web framework for building APIs.
-- **[LangChain](https://python.langchain.com/)**: For intelligent text splitting and chunking.
-- **[Chroma](https://www.trychroma.com/)**: AI-native open-source vector database.
-- **[PyMuPDF (fitz)](https://pymupdf.readthedocs.io/) & [pdfplumber](https://github.com/jsvine/pdfplumber)**: PDF data extraction.
-- **[Sentence Transformers](https://www.sbert.net/)**: Local embeddings generation (Specter2).
-- **[Ollama](https://ollama.com/)**: Local text and vision generation (Mistral 7B + Moondream).
+- Expanding multi-modal support to allow the LLM to directly interpret the extracted images (Vision capabilities).
+- Adding automated deployment scripts for remote GPU-enabled VPS setups.
+- Implementing real-time WebSockets / Server-Sent Events (SSE) to replace frontend HTTP polling for Celery task completion.

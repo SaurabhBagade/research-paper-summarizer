@@ -27,6 +27,7 @@ export function AudioPlayer({ notebookId, documentId, isProcessingPDF, notebookL
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
+  const [alertMessage, setAlertMessage] = useState<string | null>(null);
   
   const progIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -56,7 +57,7 @@ export function AudioPlayer({ notebookId, documentId, isProcessingPDF, notebookL
 
   const handleGenerate = async () => {
     if (isProcessingPDF) {
-      alert("Please wait until the PDF has finished processing its text.");
+      setAlertMessage("Please wait until the PDF has finished processing its text.");
       return;
     }
     
@@ -270,6 +271,20 @@ export function AudioPlayer({ notebookId, documentId, isProcessingPDF, notebookL
           </div>
         )}
       </div>
+
+      {/* Alert Modal */}
+      {alertMessage && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm px-4" onClick={() => setAlertMessage(null)}>
+          <div className="bg-[#1F2937] border border-[#374151] rounded-xl shadow-xl w-full max-w-sm p-6 text-center animate-in fade-in zoom-in-95" onClick={e => e.stopPropagation()}>
+            <AlertCircle className="h-10 w-10 text-[#3B82F6] mx-auto mb-4" />
+            <h3 className="text-lg font-semibold text-[#F3F4F6] mb-2">Processing Document</h3>
+            <p className="text-sm text-[#9CA3AF] mb-6">{alertMessage}</p>
+            <button onClick={() => setAlertMessage(null)} className="w-full py-2.5 bg-[#3B82F6] hover:bg-[#2563EB] text-white rounded-lg text-sm font-medium transition-colors">
+              Got it
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

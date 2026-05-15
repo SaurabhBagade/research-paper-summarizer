@@ -161,7 +161,7 @@ def generate_audio_summary_task(self, notebook_id: str, user_id: str, target_lan
         return {"status": "FAILURE", "error": "TTS failed"}
 
 @celery_app.task(bind=True)
-def generate_mindmap_task(self, notebook_id: str, user_id: str, focus_topic: str, is_expansion: bool = False):
+def generate_mindmap_task(self, notebook_id: str, user_id: str, focus_topic: str, is_expansion: bool = False, max_levels: int = 3):
     logger.info(f"Starting mindmap generation for notebook {notebook_id} on '{focus_topic}'")
     try:
         loop = asyncio.get_event_loop()
@@ -173,17 +173,21 @@ def generate_mindmap_task(self, notebook_id: str, user_id: str, focus_topic: str
     if not texts:
         return {"status": "FAILURE", "error": "No text found for notebook"}
         
-    json_result = generate_mindmap_json(texts, focus_topic)
+    json_result_str = generate_mindmap_json(texts, focus_topic, max_levels)
+    
+    import json
+    try:
+        mindmap_data = json.loads(json_result_str)
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to parse mindmap JSON: {e}")
+        return {"status": "FAILURE", "error": "LLM returned invalid JSON"}
     
     # Only overwrite the saved file if this is a brand new base generation
     if not is_expansion:
         try:
-            output_dir = os.path.join(DATA_DIR, user_id, notebook_id, "mindmap")
-            os.makedirs(output_dir, exist_ok=True)
-            output_path = os.path.join(output_dir, "mindmap.json")
-            with open(output_path, "w", encoding="utf-8") as f:
-                f.write(json_result)
+            # Save directly to the database instead of the file system
+            loop.run_until_complete(db.save_mindmap(notebook_id, mindmap_data))
         except Exception as e:
-            logger.error(f"Failed to save mindmap JSON to disk: {e}")
+            logger.error(f"Failed to save mindmap to DB: {e}")
             
-    return {"status": "SUCCESS", "mindmap": json_result}
+    return {"status": "SUCCESS", "mindmap": mindmap_data}

@@ -25,6 +25,8 @@ class Notebook(Base):
     description = Column(Text, nullable=True)
     color = Column(String(20), nullable=True)
     language = Column(String(50), default="Auto-detect")
+    notes = Column(Text, nullable=True)
+    mindmap = Column(JSONB, nullable=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
     is_deleted = Column(Boolean, default=False)

@@ -3,7 +3,7 @@ import { Workspace } from './components/Workspace';
 import { NotebookDashboard } from './components/NotebookDashboard';
 import apiClient from './api/client';
 
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router';
+import { BrowserRouter, Routes, Route, Navigate, useParams, useNavigate } from 'react-router';
 import { AuthProvider } from './context/AuthContext';
 import { ProtectedRoute } from './components/ProtectedRoute';
 import { AuthPage } from './pages/AuthPage';
@@ -27,6 +27,8 @@ interface Session {
 
 function MainApp() {
   const STORAGE_KEY = 'rps-sessions-v2';
+  const { id } = useParams();
+  const navigate = useNavigate();
 
   const [sessions, setSessions] = useState<Session[]>(() => {
     try {
@@ -43,7 +45,18 @@ function MainApp() {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(sessions));
   }, [sessions]);
 
-  const handleSelectNotebook = async (notebookId: string) => {
+  useEffect(() => {
+    if (id && id !== currentNotebookId) {
+      loadNotebook(id);
+    } else if (!id && currentNotebookId) {
+      setCurrentNotebookId(null);
+      setCurrentSessionId(null);
+      setCurrentNotebookTitle('');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, currentNotebookId]);
+
+  const loadNotebook = async (notebookId: string) => {
     setCurrentNotebookId(notebookId);
 
     try {
@@ -72,6 +85,10 @@ function MainApp() {
     }
   };
 
+  const handleSelectNotebook = (notebookId: string) => {
+    navigate(`/canvas/${notebookId}`);
+  };
+
   const handleUpdateMessages = (sessionId: string, messages: Message[]) => {
     setSessions(prev =>
       prev.map(s =>
@@ -83,9 +100,7 @@ function MainApp() {
   };
 
   const handleBackToDashboard = () => {
-    setCurrentNotebookId(null);
-    setCurrentSessionId(null);
-    setCurrentNotebookTitle('');
+    navigate('/canvas');
   };
 
   const handleNewChat = () => {
@@ -132,6 +147,7 @@ export default function App() {
           <Route path="/login" element={<AuthPage />} />
           <Route element={<ProtectedRoute />}>
             <Route path="/canvas" element={<MainApp />} />
+            <Route path="/canvas/:id" element={<MainApp />} />
           </Route>
           <Route path="*" element={<Navigate to="/canvas" replace />} />
         </Routes>

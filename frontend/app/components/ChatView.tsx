@@ -33,7 +33,7 @@ interface ChatViewProps {
   initialMessages: Message[];
   onMessagesUpdate: (sessionId: string, messages: Message[]) => void;
   onNewChat: () => void;
-  onPageJump?: (page: number) => void;
+  onPageJump?: (page: number, text?: string) => void;
   sourceCount?: number;
 }
 
@@ -261,8 +261,9 @@ export function ChatView({
                                         e.preventDefault();
                                         setHighlightedSourceId(citeId);
                                         const pageIndex = parseInt(citeId, 10) - 1;
+                                        const contextText = message.context?.[pageIndex];
                                         if (onPageJump && (message as any).context_pages?.[pageIndex]) {
-                                          onPageJump((message as any).context_pages[pageIndex]);
+                                          onPageJump((message as any).context_pages[pageIndex], contextText);
                                         }
                                         setTimeout(() => setHighlightedSourceId(null), 3000);
                                       }}
@@ -305,7 +306,7 @@ export function ChatView({
                                     <button
                                       onClick={(e) => {
                                         e.preventDefault();
-                                        if (onPageJump) onPageJump(pageNum);
+                                        if (onPageJump) onPageJump(pageNum, ctx);
                                         setHighlightedSourceId(String(idx + 1));
                                         setTimeout(() => setHighlightedSourceId(null), 3000);
                                       }}

@@ -8,7 +8,7 @@ import db
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-MODEL_API_URL = os.environ.get('MODEL_API_URL', 'http://model_api:8000')
+MODEL_API_URL = os.environ.get('MODEL_API_URL', 'http://model_api:8008')
 
 # ── Block-level loading (preferred — has bbox coords) ──────────────────────────
 
@@ -134,11 +134,19 @@ def _union_bbox(bboxes):
 
 def get_embeddings_from_api(chunks):
     """Calls the model_api container to get Specter2 embeddings for chunks."""
+    if not chunks:
+        return []
+        
     logger.info(f"Requesting embeddings for {len(chunks)} chunks from {MODEL_API_URL}/embed...")
+    all_embeddings = []
+    batch_size = 32
     try:
-        response = requests.post(f"{MODEL_API_URL}/embed", json={"texts": chunks})
-        response.raise_for_status()
-        return response.json()["embeddings"]
+        for i in range(0, len(chunks), batch_size):
+            batch = chunks[i:i+batch_size]
+            response = requests.post(f"{MODEL_API_URL}/embed", json={"texts": batch}, timeout=180)
+            response.raise_for_status()
+            all_embeddings.extend(response.json()["embeddings"])
+        return all_embeddings
     except requests.exceptions.RequestException as e:
         logger.error(f"Error communicating with Model API: {e}", exc_info=True)
         return None
@@ -347,8 +355,13 @@ def process_and_embed(json_path, collection_name, blocks_json_path=None, noteboo
         return False
 
     # Extract NER tags for each chunk
-    logger.info("Extracting NER tags using spaCy...")
-    ner_tags_per_chunk = [extract_ner_tags(text) for text in texts]
+    logger.info("Extracting NER tags using spaCy (First page only)...")
+    ner_tags_per_chunk = []
+    for i, c in enumerate(tagged_chunks):
+        if c.get("page_num") == 1:
+            ner_tags_per_chunk.append(extract_ner_tags(c["text"]))
+        else:
+            ner_tags_per_chunk.append({})
     
     # Aggregate NER tags for the document
     aggregated_ner = {}

@@ -123,6 +123,8 @@ async def get_notebooks(current_user = Depends(get_current_user)):
 async def update_notebook(notebook_id: str, req: dict, current_user = Depends(get_current_user)):
     if "language" in req:
         await db.update_notebook_language(notebook_id, req["language"])
+    if "notes" in req:
+        await db.update_notebook_notes(notebook_id, req["notes"])
     
     nb = await db.get_notebook(notebook_id)
     return {"status": "success", "notebook": nb}
@@ -137,8 +139,7 @@ async def get_notebook(notebook_id: str, current_user = Depends(get_current_user
     audio_path = os.path.join(DATA_DIR, current_user.id, notebook_id, "audio", "summary.mp3")
     nb['audio_generated'] = os.path.exists(audio_path)
     
-    mindmap_path = os.path.join(DATA_DIR, current_user.id, notebook_id, "mindmap", "mindmap.json")
-    nb['mindmap_generated'] = os.path.exists(mindmap_path) or ("mindmap" in nb and nb["mindmap"] is not None)
+    nb['mindmap_generated'] = nb.get("mindmap") is not None
 
     return {"notebook": nb}
 
@@ -155,13 +156,20 @@ async def delete_notebook_endpoint(notebook_id: str, current_user = Depends(get_
         LocalStorageManager.delete_file(path)
     return {"status": "success", "message": f"Notebook {notebook_id} and sources deleted."}
 
-@app.delete("/api/sources/{source_id}")
-async def delete_source_endpoint(source_id: str, current_user = Depends(get_current_user)):
-    file_path = await db.delete_source(source_id)
+@app.delete("/api/documents/{document_id}")
+async def delete_document_endpoint(document_id: str, current_user = Depends(get_current_user)):
+    file_path = await db.delete_source(document_id)
     if file_path:
         LocalStorageManager.delete_file(file_path)
-        return {"status": "success", "message": f"Source {source_id} deleted."}
-    raise HTTPException(status_code=404, detail="Source not found")
+        return {"status": "success", "message": f"Document {document_id} deleted."}
+    raise HTTPException(status_code=404, detail="Document not found")
+
+@app.patch("/api/documents/{document_id}")
+async def rename_document_endpoint(document_id: str, req: dict, current_user = Depends(get_current_user)):
+    new_title = req.get("title")
+    if new_title and hasattr(db, "rename_source"):
+        await db.rename_source(document_id, new_title)
+    return {"status": "success"}
 
 def sanitize_document_id(name: str) -> str:
     """
@@ -313,6 +321,10 @@ async def ask_question(req: AskRequest):
         ))  # deduplicated, ordered page numbers
         context_text = "\n\n".join(context_chunks)
         
+        # Prevent context overflow by truncating if necessary
+        if len(context_text) > 15000:
+            context_text = context_text[:15000]
+        
         # 4. Fetch last 6 messages (3 turns) from session history to give model context
         HISTORY_TURNS = 3
         history_text = ""
@@ -359,7 +371,12 @@ async def ask_question(req: AskRequest):
         logger.info("Sending prompt to model_api /generate...")
         response = requests.post(
             f"{MODEL_API_URL}/generate",
-            json={"prompt": prompt, "max_length": MAX_GENERATE_TOKENS},
+            json={
+                "prompt": prompt, 
+                "max_length": MAX_GENERATE_TOKENS,
+                "temperature": 0.3
+            },
+            timeout=180
         )
         response.raise_for_status()
         
@@ -533,6 +550,7 @@ async def get_task_status(task_id: str):
 
 class MindmapRequest(BaseModel):
     focus_topic: str
+    max_levels: int = 3
 
 class AudioRequest(BaseModel):
     target_language: str = "English"
@@ -562,25 +580,20 @@ async def serve_audio_summary(notebook_id: str, token: str = None):
 
 @app.post("/api/notebooks/{notebook_id}/mindmap")
 async def request_mindmap(notebook_id: str, req: MindmapRequest, current_user = Depends(get_current_user)):
-    task = generate_mindmap_task.delay(notebook_id, current_user.id, req.focus_topic, False)
+    task = generate_mindmap_task.delay(notebook_id, current_user.id, req.focus_topic, is_expansion=False, max_levels=req.max_levels)
     return {"status": "success", "task_id": task.id}
 
 @app.get("/api/notebooks/{notebook_id}/mindmap")
 async def serve_mindmap(notebook_id: str, current_user = Depends(get_current_user)):
-    # Check database first if get_mindmap db function exists
-    if hasattr(db, "get_mindmap"):
-        mm = await db.get_mindmap(notebook_id)
-        if mm:
-            return mm
-            
-    mindmap_path = os.path.join(DATA_DIR, current_user.id, notebook_id, "mindmap", "mindmap.json")
-    if not os.path.exists(mindmap_path):
-        raise HTTPException(status_code=404, detail="Mindmap not found or not generated yet.")
-    return FileResponse(path=mindmap_path, media_type="application/json")
+    mm = await db.get_mindmap(notebook_id)
+    if mm:
+        return mm
+        
+    raise HTTPException(status_code=404, detail="Mindmap not found or not generated yet.")
 
 @app.post("/api/notebooks/{notebook_id}/mindmap/expand")
 async def request_mindmap_expand(notebook_id: str, req: MindmapRequest, current_user = Depends(get_current_user)):
-    task = generate_mindmap_task.delay(notebook_id, current_user.id, req.focus_topic, True)
+    task = generate_mindmap_task.delay(notebook_id, current_user.id, req.focus_topic, is_expansion=True, max_levels=req.max_levels)
     return {"status": "success", "task_id": task.id}
 
 if __name__ == "__main__":

@@ -1,21 +1,30 @@
-import { FileText, Maximize2, Minimize2, ChevronLeft, ChevronRight, ZoomIn, ZoomOut } from 'lucide-react';
+import { FileText, Maximize2, Minimize2, ZoomIn, ZoomOut, ArrowLeft } from 'lucide-react';
 import { useState, useEffect, useRef } from 'react';
 
 interface PDFViewerProps {
     documentId: string;
     currentPage?: number;
     highlights?: any[];
+    onClose?: () => void;
 }
 
-export function PDFViewer({ documentId, currentPage = 1, highlights = [] }: PDFViewerProps) {
+export function PDFViewer({ documentId, currentPage = 1, highlights = [], onClose }: PDFViewerProps) {
     const [isExpanded, setIsExpanded] = useState(false);
     const [hasError, setHasError] = useState(false);
     const [zoom, setZoom] = useState(100);
     const iframeRef = useRef<HTMLIFrameElement>(null);
 
+    const getSearchString = (text: string) => {
+        if (!text) return '';
+        // Take the first 5-6 words to ensure a match without line-break issues breaking the native search
+        const words = text.replace(/[\r\n]+/g, ' ').split(/\s+/).filter(Boolean);
+        return encodeURIComponent(words.slice(0, 6).join(' '));
+    };
+
     const pdfBaseUrl = `/api/pdf/${documentId}`;
     const iframeKey = `${documentId}-page-${currentPage}-zoom-${zoom}`;
-    const pdfUrl = `${pdfBaseUrl}#page=${currentPage}&zoom=${zoom}`;
+    const searchParam = highlights && highlights.length > 0 ? `&search=${getSearchString(highlights[0])}` : '';
+    const pdfUrl = `${pdfBaseUrl}#page=${currentPage}&zoom=${zoom}&toolbar=0&navpanes=0&scrollbar=0${searchParam}`;
 
     useEffect(() => {
         setHasError(false);
@@ -26,6 +35,15 @@ export function PDFViewer({ documentId, currentPage = 1, highlights = [] }: PDFV
             {/* Viewer Header */}
             <div className="flex items-center justify-between px-4 py-3 bg-white border-b border-slate-200 flex-shrink-0 shadow-sm">
                 <div className="flex items-center gap-3">
+                    {onClose && (
+                        <button
+                            onClick={onClose}
+                            className="p-1.5 hover:bg-slate-100 rounded-lg transition-colors text-slate-600 border border-slate-200 mr-1"
+                            title="Close PDF"
+                        >
+                            <ArrowLeft className="w-4 h-4" />
+                        </button>
+                    )}
                     <div className="p-1.5 bg-indigo-50 rounded-lg">
                         <FileText className="w-4 h-4 text-indigo-600" />
                     </div>

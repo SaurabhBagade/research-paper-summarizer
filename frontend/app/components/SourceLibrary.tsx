@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import {
-  FileText, Plus, Globe, Search, Filter,
-  Loader2, Check, Upload, MoreVertical, X, Eye, Edit2, Trash2
+  FileText, Plus, Search,
+  Loader2, Check, Upload, MoreVertical, X, Eye, Edit2, Trash2, AlertCircle
 } from 'lucide-react';
 import apiClient from '../api/client';
 import { useCitation } from '../context/CitationContext';
@@ -42,6 +42,8 @@ export function SourceLibrary({
   const [openDropdownId, setOpenDropdownId] = useState<string | null>(null);
   const [editingSourceId, setEditingSourceId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
+  const [alertMessage, setAlertMessage] = useState<string | null>(null);
+  const [sourceToDelete, setSourceToDelete] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { highlightedSourceId } = useCitation();
 
@@ -89,6 +91,12 @@ export function SourceLibrary({
 
     const pdfFiles = files.filter(f => f.type === 'application/pdf');
     if (pdfFiles.length === 0) return;
+
+    if (sources.length + pdfFiles.length > 10) {
+      setAlertMessage(`Maximum 10 resources allowed per canvas. You currently have ${sources.length}.`);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      return;
+    }
 
     setIsUploading(true);
     setUploadProgress(`Uploading ${pdfFiles.length} file(s)...`);
@@ -161,8 +169,8 @@ export function SourceLibrary({
     try {
       // Optimistic update
       setSources(prev => prev.map(s => s.id === id ? { ...s, title: newName } : s));
-      // Call backend (Make sure this matches your actual API endpoint)
-      await apiClient.patch(`/api/sources/${id}`, { title: newName });
+      // Rename document API
+      await apiClient.patch(`/api/documents/${id}`, { title: newName });
     } catch (e) {
       console.error('Failed to rename source', e);
       fetchSources(true); // Revert on failure
@@ -170,16 +178,22 @@ export function SourceLibrary({
     setEditingSourceId(null);
   };
 
-  const handleDeleteSource = async (id: string, e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (!window.confirm('Are you sure you want to delete this source?')) return;
+  const confirmDelete = async () => {
+    if (!sourceToDelete) return;
+    const id = sourceToDelete;
+    setSourceToDelete(null);
     try {
       setSources(prev => prev.filter(s => s.id !== id));
-      await apiClient.delete(`/api/sources/${id}`);
+      await apiClient.delete(`/api/documents/${id}`);
     } catch (e) {
       console.error('Failed to delete source', e);
       fetchSources(true); // Revert on failure
     }
+  };
+
+  const handleDeleteSource = (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setSourceToDelete(id);
     setOpenDropdownId(null);
   };
 
@@ -283,7 +297,7 @@ export function SourceLibrary({
                     isProcessing ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer'
                   } ${
                     isActive
-                      ? 'bg-[#374151] border-l-[3px] border-l-[#3B82F6]'
+                      ? 'bg-[#272E3E] ring-1 ring-[#3B82F6] shadow-md border-l-[3px] border-l-[#3B82F6]'
                       : isHighlighted
                         ? 'bg-[#3B82F6]/20 ring-2 ring-[#3B82F6] shadow-[0_0_15px_rgba(59,130,246,0.4)]'
                         : !isProcessing && isSelected
@@ -330,17 +344,27 @@ export function SourceLibrary({
                     </p>
                     {!isProcessing && source.metadata_json?.ner_tags && 
                       ((source.metadata_json.ner_tags.PERSON?.length || 0) > 0 || (source.metadata_json.ner_tags.ORG?.length || 0) > 0) && (
-                        <div className="mt-2 flex flex-wrap gap-1">
-                          {source.metadata_json.ner_tags.PERSON?.slice(0, 2).map((author, i) => (
-                            <span key={`person-${i}`} className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-[#4C1D95]/30 text-[#C4B5FD] border border-[#5B21B6]/50">
-                              {author}
-                            </span>
-                          ))}
-                          {source.metadata_json.ner_tags.ORG?.slice(0, 1).map((org, i) => (
-                            <span key={`org-${i}`} className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-[#1E3A8A]/30 text-[#93C5FD] border border-[#1E40AF]/50">
-                              {org}
-                            </span>
-                          ))}
+                        <div className="mt-2 flex flex-col gap-1">
+                          {source.metadata_json.ner_tags.PERSON && source.metadata_json.ner_tags.PERSON.length > 0 && (
+                            <div className="flex flex-wrap gap-1 items-center">
+                              <span className="text-[9px] text-[#9CA3AF] mr-1 uppercase tracking-wider">Authors:</span>
+                              {source.metadata_json.ner_tags.PERSON.slice(0, 2).map((author, i) => (
+                                <span key={`person-${i}`} className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-[#4C1D95]/30 text-[#C4B5FD] border border-[#5B21B6]/50">
+                                  👤 {author}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                          {source.metadata_json.ner_tags.ORG && source.metadata_json.ner_tags.ORG.length > 0 && (
+                            <div className="flex flex-wrap gap-1 items-center mt-0.5">
+                              <span className="text-[9px] text-[#9CA3AF] mr-1 uppercase tracking-wider">Institute:</span>
+                              {source.metadata_json.ner_tags.ORG.slice(0, 1).map((org, i) => (
+                                <span key={`org-${i}`} className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-[#1E3A8A]/30 text-[#93C5FD] border border-[#1E40AF]/50">
+                                  🏛️ {org}
+                                </span>
+                              ))}
+                            </div>
+                          )}
                         </div>
                     )}
                   </div>
@@ -406,6 +430,38 @@ export function SourceLibrary({
           {selectedSources.size} of {sources.length} source{sources.length !== 1 ? 's' : ''} selected
         </p>
       </div>
+
+      {/* Alert Modal */}
+      {alertMessage && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm px-4" onClick={() => setAlertMessage(null)}>
+          <div className="bg-[#1F2937] border border-[#374151] rounded-xl shadow-xl w-full max-w-sm p-6 text-center animate-in fade-in zoom-in-95" onClick={e => e.stopPropagation()}>
+            <AlertCircle className="h-10 w-10 text-[#3B82F6] mx-auto mb-4" />
+            <h3 className="text-lg font-semibold text-[#F3F4F6] mb-2">Notice</h3>
+            <p className="text-sm text-[#9CA3AF] mb-6">{alertMessage}</p>
+            <button onClick={() => setAlertMessage(null)} className="w-full py-2.5 bg-[#3B82F6] hover:bg-[#2563EB] text-white rounded-lg text-sm font-medium transition-colors">
+              Got it
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Confirmation Modal */}
+      {sourceToDelete && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm px-4" onClick={() => setSourceToDelete(null)}>
+          <div className="bg-[#1F2937] border border-[#374151] rounded-xl shadow-xl w-full max-w-sm p-6 text-center animate-in fade-in zoom-in-95" onClick={e => e.stopPropagation()}>
+            <h3 className="text-lg font-semibold text-[#F3F4F6] mb-2 text-red-400">Delete Source</h3>
+            <p className="text-sm text-[#9CA3AF] mb-6">Are you sure you want to delete this source? This action cannot be undone.</p>
+            <div className="flex justify-center gap-3">
+              <button onClick={() => setSourceToDelete(null)} className="px-4 py-2.5 flex-1 text-[#9CA3AF] hover:text-[#F3F4F6] hover:bg-[#374151] rounded-lg text-sm font-medium transition-colors">
+                Cancel
+              </button>
+              <button onClick={confirmDelete} className="px-4 py-2.5 flex-1 bg-red-500 hover:bg-red-600 text-white rounded-lg text-sm font-medium transition-colors">
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

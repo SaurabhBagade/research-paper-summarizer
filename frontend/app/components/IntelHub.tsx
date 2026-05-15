@@ -1,9 +1,10 @@
 import { useState } from 'react';
 import {
-  Mic, Brain, ExternalLink
+  Mic, Brain, Edit3
 } from 'lucide-react';
 import { AudioPlayer } from './AudioPlayer';
 import { MindmapView } from './MindmapView';
+import { NotesView } from './NotesView';
 
 interface StudioProps {
   notebookId: string;
@@ -14,7 +15,7 @@ interface StudioProps {
 }
 
 export function IntelHub({ notebookId, documentId, isProcessingPDF, onImageClick, notebookLanguage }: StudioProps) {
-  const [activeTab, setActiveTab] = useState<'audio' | 'mindmap'>('audio');
+  const [activeTab, setActiveTab] = useState<'audio' | 'mindmap' | 'notes'>('audio');
 
   return (
     <div className="h-full bg-[#1F2937] border-l border-[#374151] flex flex-col overflow-hidden">
@@ -51,12 +52,26 @@ export function IntelHub({ notebookId, documentId, isProcessingPDF, onImageClick
             Mindmap
           </span>
         </button>
+        <button
+          onClick={() => setActiveTab('notes')}
+          className={`flex-1 py-3 text-sm font-medium transition-colors ${
+            activeTab === 'notes'
+              ? 'text-[#3B82F6] border-b-2 border-[#3B82F6] bg-[#272E3E]/50'
+              : 'text-[#9CA3AF] hover:text-[#F3F4F6] hover:bg-[#374151]/30'
+          }`}
+        >
+          <span className="flex items-center justify-center gap-2">
+            <Edit3 className="h-4 w-4" />
+            Notes
+          </span>
+        </button>
       </div>
 
       {/* Tab Content */}
       <div className="flex-1 overflow-y-auto min-h-0 p-6 flex flex-col">
         {activeTab === 'audio' && <AudioPlayer notebookId={notebookId} documentId={documentId} isProcessingPDF={isProcessingPDF} notebookLanguage={notebookLanguage} />}
         {activeTab === 'mindmap' && <MindmapView notebookId={notebookId} documentId={documentId} isProcessingPDF={isProcessingPDF} />}
+        {activeTab === 'notes' && <NotesView notebookId={notebookId} />}
       </div>
     </div>
   );

@@ -1,6 +1,6 @@
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
 import { useState, useEffect } from 'react';
-import { BookOpen, Share2, Settings, BarChart2, ArrowLeft, X, UserPlus, Loader2 } from 'lucide-react';
+import { BookOpen, Share2, Settings, BarChart2, ArrowLeft, X, UserPlus, Loader2, AlertCircle, CheckCircle2 } from 'lucide-react';
 import { Message } from '../App';
 import { SourceLibrary } from './SourceLibrary';
 import { ChatView } from './ChatView';
@@ -42,6 +42,7 @@ export function Workspace({
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [notebookLanguage, setNotebookLanguage] = useState('English');
   const [isUpdatingLanguage, setIsUpdatingLanguage] = useState(false);
+  const [alertMessage, setAlertMessage] = useState<{ title: string, message: string, type: 'success' | 'error' } | null>(null);
 
   useEffect(() => {
     const fetchNotebookLanguage = async () => {
@@ -81,11 +82,11 @@ export function Workspace({
     setIsSharing(true);
     try {
       await apiClient.post(`/api/notebooks/${notebookId}/share`, { email: shareEmail.trim() });
-      alert('Notebook shared successfully!');
+      setAlertMessage({ title: 'Success', message: 'Notebook shared successfully!', type: 'success' });
       setShowShareModal(false);
       setShareEmail('');
     } catch (err) {
-      alert('Failed to share notebook. Ensure the user exists.');
+      setAlertMessage({ title: 'Share Failed', message: 'Failed to share notebook. Ensure the user exists.', type: 'error' });
     } finally {
       setIsSharing(false);
     }
@@ -96,10 +97,10 @@ export function Workspace({
     try {
       await apiClient.patch(`/api/notebooks/${notebookId}`, { language: notebookLanguage });
       setShowSettingsModal(false);
-      // Optional: Show a subtle toast notification that language updated
+      setAlertMessage({ title: 'Settings Saved', message: 'Language updated successfully.', type: 'success' });
     } catch (err) {
       console.error('Failed to update language', err);
-      alert('Failed to update language settings');
+      setAlertMessage({ title: 'Update Failed', message: 'Failed to update language settings.', type: 'error' });
     } finally {
       setIsUpdatingLanguage(false);
     }
@@ -161,20 +162,12 @@ export function Workspace({
           <Panel defaultSize={showPDFViewer ? 50 : 50} minSize={30}>
             {showPDFViewer && activeDocumentId ? (
               <div className="h-full flex flex-col bg-[#1F2937] relative">
-                <div className="absolute top-3 right-5 z-10">
-                  <button
-                    onClick={() => setShowPDFViewer(false)}
-                    className="flex items-center gap-1.5 text-xs text-[#F3F4F6] bg-[#374151] hover:bg-[#4B5563] shadow-md px-3 py-1.5 rounded-md transition-colors"
-                  >
-                    <ArrowLeft className="h-3.5 w-3.5" />
-                    Close PDF
-                  </button>
-                </div>
                 <div className="flex-1 overflow-hidden">
                   <PDFViewer
                     documentId={activeDocumentId}
                     currentPage={currentPage}
                     highlights={highlights}
+                    onClose={() => setShowPDFViewer(false)}
                   />
                 </div>
               </div>
@@ -186,8 +179,9 @@ export function Workspace({
                 initialMessages={initialMessages}
                 onMessagesUpdate={handleMessagesUpdate}
                 onNewChat={onNewChat}
-                onPageJump={(page) => {
+                onPageJump={(page, text) => {
                   setCurrentPage(page);
+                  if (text) setHighlights([text]);
                   if (activeDocumentId) setShowPDFViewer(true);
                 }}
                 sourceCount={sourceCount}
@@ -208,8 +202,9 @@ export function Workspace({
                 initialMessages={initialMessages}
                 onMessagesUpdate={handleMessagesUpdate}
                 onNewChat={onNewChat}
-                onPageJump={(page) => {
+                onPageJump={(page, text) => {
                   setCurrentPage(page);
+                  if (text) setHighlights([text]);
                 }}
                 sourceCount={sourceCount}
               />
@@ -307,6 +302,22 @@ export function Workspace({
                 {isUpdatingLanguage ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Save Settings'}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Alert Modal */}
+      {alertMessage && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4" onClick={() => setAlertMessage(null)}>
+          <div className="bg-[#1F2937] border border-[#374151] rounded-xl shadow-xl w-full max-w-sm p-6 text-center animate-in fade-in zoom-in-95" onClick={e => e.stopPropagation()}>
+            <div className="mx-auto w-12 h-12 rounded-full bg-[#272E3E] flex items-center justify-center mb-4 border border-[#374151]">
+              {alertMessage.type === 'success' ? <CheckCircle2 className="h-6 w-6 text-green-400" /> : <AlertCircle className="h-6 w-6 text-red-400" />}
+            </div>
+            <h3 className="text-lg font-semibold text-[#F3F4F6] mb-2">{alertMessage.title}</h3>
+            <p className="text-sm text-[#9CA3AF] mb-6">{alertMessage.message}</p>
+            <button onClick={() => setAlertMessage(null)} className="w-full py-2.5 bg-[#3B82F6] hover:bg-[#2563EB] text-white rounded-lg text-sm font-medium transition-colors">
+              Got it
+            </button>
           </div>
         </div>
       )}

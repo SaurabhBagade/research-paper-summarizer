@@ -201,7 +201,33 @@ async def get_notebook(notebook_id: str):
             "description": nb.description,
             "color": nb.color,
             "language": getattr(nb, 'language', 'English'),
+            "notes": getattr(nb, 'notes', ''),
+            "mindmap": getattr(nb, 'mindmap', None)
         }
+
+async def update_notebook_notes(notebook_id: str, notes: str):
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(Notebook).filter_by(id=notebook_id))
+        nb = result.scalar_one_or_none()
+        if nb:
+            nb.notes = notes
+            await session.commit()
+
+async def save_mindmap(notebook_id: str, mindmap_data: dict):
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(Notebook).filter_by(id=notebook_id))
+        nb = result.scalar_one_or_none()
+        if nb:
+            nb.mindmap = mindmap_data
+            await session.commit()
+
+async def get_mindmap(notebook_id: str):
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(Notebook).filter_by(id=notebook_id))
+        nb = result.scalar_one_or_none()
+        if nb and getattr(nb, 'mindmap', None):
+            return nb.mindmap
+        return None
 
 async def update_notebook_language(notebook_id: str, language: str):
     async with AsyncSessionLocal() as session:

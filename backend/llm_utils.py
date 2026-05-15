@@ -62,7 +62,7 @@ def map_reduce_summarize(texts: List[str], target_language: str = "English") -> 
     final_script = query_llm(reduce_prompt, max_new_tokens=400, temperature=0.5)
     return final_script.strip() if final_script else "Failed to generate audio script."
 
-def generate_mindmap_json(texts: List[str], focus_topic: str) -> str:
+def generate_mindmap_json(texts: List[str], focus_topic: str, max_levels: int = 3) -> str:
     """
     Prompts the LLM to generate a structured JSON mindmap from the provided texts.
     """
@@ -73,7 +73,8 @@ def generate_mindmap_json(texts: List[str], focus_topic: str) -> str:
 
     prompt = (
         f"Generate a comprehensive, multi-level mindmap focusing on '{focus_topic}' based on the text below.\n"
-        "Extract the main topic, key sub-topics, and detailed supporting concepts. Ensure the graph is thorough with at least 15-20 nodes representing a complete hierarchical tree.\n"
+        f"CRITICAL STRUCTURAL INSTRUCTION: You must build this mindmap to exactly {max_levels} levels of depth. Do not create nodes deeper than this level.\n"
+        "Level 1: Main Topic. Level 2: Sub Topics. Level 3: Supporting Concepts.\n"
         "You MUST output strictly valid JSON with this exact schema:\n"
         "{\n"
         "  \"nodes\": [{\"id\": \"node1\", \"label\": \"Main Topic\"}, {\"id\": \"node2\", \"label\": \"Sub Topic\"}],\n"
