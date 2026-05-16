@@ -14,10 +14,16 @@ export function PDFViewer({ documentId, currentPage = 1, highlights = [], onClos
     const [zoom, setZoom] = useState(100);
     const iframeRef = useRef<HTMLIFrameElement>(null);
 
-    const getSearchString = (text: string) => {
+    const getSearchString = (text: any) => {
         if (!text) return '';
+        
+        // Extract string if text is an object (e.g., from backend context_highlights)
+        const content = typeof text === 'string' ? text : (text.text || text.content);
+        
+        if (!content || typeof content.replace !== 'function') return '';
+
         // Take the first 5-6 words to ensure a match without line-break issues breaking the native search
-        const words = text.replace(/[\r\n]+/g, ' ').split(/\s+/).filter(Boolean);
+        const words = content.replace(/[\r\n]+/g, ' ').split(/\s+/).filter(Boolean);
         return encodeURIComponent(words.slice(0, 6).join(' '));
     };
 

@@ -39,7 +39,7 @@ export function IntelHub({ notebookId, documentId, isProcessingPDF, onImageClick
             Audio Summary
           </span>
         </button>
-        <button
+        {/* <button
           onClick={() => setActiveTab('mindmap')}
           className={`flex-1 py-3 text-sm font-medium transition-colors ${
             activeTab === 'mindmap'
@@ -51,7 +51,7 @@ export function IntelHub({ notebookId, documentId, isProcessingPDF, onImageClick
             <Brain className="h-4 w-4" />
             Mindmap
           </span>
-        </button>
+        </button> */}
         <button
           onClick={() => setActiveTab('notes')}
           className={`flex-1 py-3 text-sm font-medium transition-colors ${

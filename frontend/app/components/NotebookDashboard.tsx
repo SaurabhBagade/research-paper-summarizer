@@ -225,7 +225,7 @@ export function NotebookDashboard({ onSelectNotebook }: NotebookDashboardProps) 
               </h2>
               <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-5">
                 {/* Create New Card */}
-                <button
+                {/* <button
                   onClick={() => setShowCreateModal(true)}
                   className="aspect-square rounded-lg border border-dashed border-[#374151] bg-[#1F2937] hover:bg-[#272E3E] hover:border-[#3B82F6] transition-all duration-200 flex flex-col items-center justify-center cursor-pointer group"
                 >
@@ -233,7 +233,7 @@ export function NotebookDashboard({ onSelectNotebook }: NotebookDashboardProps) 
                     <Plus className="h-6 w-6 text-[#9CA3AF] group-hover:text-white" />
                   </div>
                   <p className="text-sm font-medium text-[#9CA3AF] group-hover:text-[#F3F4F6]">Create New</p>
-                </button>
+                </button> */}
 
                 {/* Notebook Cards */}
                 {(featuredNotebooks.length > 0 ? recentNotebooks : filteredNotebooks).map((nb, i) => (
